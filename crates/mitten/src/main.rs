@@ -1,5 +1,6 @@
 mod agent;
 mod chat;
+mod compact;
 mod config;
 mod db;
 mod discord;

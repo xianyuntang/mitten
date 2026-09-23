@@ -14,6 +14,7 @@ use rig_core::providers::{anthropic, openai};
 use serde_json::{Value, json};
 use tokio::process::Command;
 
+use crate::compact;
 use crate::config::{Api, Config};
 use crate::db::Db;
 use crate::memory;
@@ -126,14 +127,20 @@ When the obvious interpretation is clear, act; ask only when the ambiguity chang
 
 /// Stable text first, per-session details last, so the provider can cache the prefix.
 /// Memory is read once here, so edits show up from the next conversation (or `/new`) on.
-async fn system_prompt(db: &Db, memory_id: i64, key: &str) -> Result<String> {
+/// `search` adds the web search guidance when the `web_search` tool is available.
+async fn system_prompt(db: &Db, memory_id: i64, key: &str, search: bool) -> Result<String> {
     let cwd = std::env::current_dir().context("failed to read current directory")?;
     let memories = db
         .memories(memory_id)
         .await
         .context("failed to load memory")?;
+    let search = if search {
+        format!("{}\n\n", search::GUIDANCE)
+    } else {
+        String::new()
+    };
     Ok(format!(
-        "{IDENTITY}\n\n{guidance}\n\n{hint}\n\n{saved}\n\nOS: {os}. Working directory: {cwd}.",
+        "{IDENTITY}\n\n{search}{guidance}\n\n{hint}\n\n{saved}\n\nOS: {os}. Working directory: {cwd}.",
         guidance = memory::GUIDANCE,
         hint = platform_hint(key),
         saved = memory::snapshot(&memories),
@@ -241,7 +248,7 @@ impl Agent {
             .map(|row| serde_json::from_value(row.content))
             .collect::<Result<Vec<Message>, _>>()
             .context("stored conversation is unreadable; send /new to start over")?;
-        let system = system_prompt(&db, memory_id, key).await?;
+        let system = system_prompt(&db, memory_id, key, config.searxng.is_some()).await?;
         let search = config.searxng.clone().map(WebSearch::new).transpose()?;
         Ok(Self {
             model: Model::new(&config, &format!("mitten-{}", conversation.id))?,
@@ -282,7 +289,7 @@ impl Agent {
             return Ok("error: web search is not configured".to_owned());
         };
         if let Some(query) = args["query"].as_str() {
-            io.note(&format!("searching: {query}")).await?;
+            io.note(&format!("🔎 searching: {query}")).await?;
         }
         Ok(search.run(args).await)
     }
@@ -296,6 +303,7 @@ impl Agent {
     /// On failure the turn is cut back to its last complete tool round so the history stays valid;
     /// rounds whose commands already ran are kept, so the model knows what changed.
     pub async fn run_turn(&mut self, prompt: &str, io: &mut impl Io) -> Result<()> {
+        self.compact_if_needed(prompt, io).await?;
         let turn_start = self.messages.len();
         let result = self.drive(prompt, io).await;
         if let Err(err) = &result {
@@ -318,12 +326,66 @@ impl Agent {
         result
     }
 
+    /// Summarizes older turns once history (plus `prompt`) passes the configured budget, keeping
+    /// recent whole turns verbatim. A failed summary is reported and the turn goes ahead uncompacted.
+    async fn compact_if_needed(&mut self, prompt: &str, io: &mut impl Io) -> Result<()> {
+        let budget = self.config.compact_at_tokens;
+        if compact::estimate_tokens(&self.messages) + prompt.chars().count() / 3 <= budget {
+            return Ok(());
+        }
+        let cut = compact::split_point(&self.messages, budget / 4);
+        if cut == 0 {
+            return Ok(());
+        }
+        io.note("🗜️ compacting earlier conversation…").await?;
+        let mut request = request(
+            &self.config,
+            compact::SYSTEM,
+            &[Message::user(compact::transcript(&self.messages[..cut]))],
+        );
+        request.tools.clear();
+        let summary = match self.model.complete(request).await {
+            Ok(response) => response
+                .choice
+                .iter()
+                .filter_map(|content| match content {
+                    AssistantContent::Text(text) => Some(text.text()),
+                    _ => None,
+                })
+                .collect::<String>(),
+            Err(err) => {
+                tracing::warn!("compaction failed: {err:#}");
+                return io
+                    .note("🗜️ compaction failed; continuing with full history")
+                    .await;
+            }
+        };
+        if summary.trim().is_empty() {
+            return io
+                .note("🗜️ compaction returned nothing; continuing with full history")
+                .await;
+        }
+        let mut compacted = compact::summary_messages(&summary).to_vec();
+        compacted.extend(self.messages.drain(cut..));
+        let rows = compacted
+            .iter()
+            .map(serde_json::to_value)
+            .collect::<Result<Vec<Value>, _>>()?;
+        self.db
+            .rewrite(self.conversation_id, rows)
+            .await
+            .context("failed to save the compacted conversation")?;
+        self.messages = compacted;
+        Ok(())
+    }
+
     /// Forgets the conversation, in memory and on disk.
     pub async fn reset(&mut self) -> Result<()> {
         self.db.clear(self.conversation_id).await?;
         self.messages.clear();
         // A fresh conversation picks up memory saved since the last one started.
-        self.system = system_prompt(&self.db, self.memory_id, &self.key).await?;
+        self.system =
+            system_prompt(&self.db, self.memory_id, &self.key, self.search.is_some()).await?;
         Ok(())
     }
 

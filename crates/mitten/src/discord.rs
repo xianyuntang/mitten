@@ -9,7 +9,7 @@ use std::time::Duration;
 use anyhow::{Context as _, Result, bail};
 use serenity::all::{
     AutoArchiveDuration, ButtonStyle, ChannelId, ChannelType, Client, ComponentInteraction,
-    Context, CreateActionRow, CreateButton, CreateInteractionResponse,
+    Context, CreateActionRow, CreateAllowedMentions, CreateButton, CreateInteractionResponse,
     CreateInteractionResponseMessage, CreateMessage, CreateThread, EditMessage, EventHandler,
     GatewayIntents, Http, Interaction, Message, MessageId, Ready,
 };
@@ -29,6 +29,8 @@ const DONE: char = '✅';
 const FAILED: char = '❌';
 const RUN: &str = "mitten:run";
 const DENY: &str = "mitten:deny";
+/// Longest status line kept; statuses are one-line summaries.
+const MAX_STATUS_CHARS: usize = 200;
 /// Discord caps thread names at 100 characters.
 const MAX_THREAD_NAME_CHARS: usize = 80;
 
@@ -253,6 +255,7 @@ async fn run_channel(
         channel,
         inbox,
         approval: None,
+        status: None,
     };
     while let Some(input) = io.inbox.recv().await {
         let Input::Text {
@@ -279,6 +282,7 @@ async fn run_channel(
             io.finish(origin, message, ok).await;
             continue;
         }
+        io.status = None;
         let typing = io.channel.start_typing(&io.http);
         let result = agent.run_turn(prompt, &mut io).await;
         drop(typing);
@@ -298,9 +302,22 @@ struct DiscordIo {
     inbox: mpsc::UnboundedReceiver<Input>,
     /// The last approved command's message and its command block, where the output goes.
     approval: Option<(MessageId, String)>,
+    /// The status message notes are being collected into, and its text so far.
+    status: Option<(MessageId, String)>,
 }
 
 impl DiscordIo {
+    /// Sends a message that can't ping anyone, whatever the model or a search result put in it.
+    async fn send(&self, message: CreateMessage) -> Result<MessageId> {
+        let message = message.allowed_mentions(CreateAllowedMentions::new());
+        Ok(self
+            .channel
+            .send_message(&self.http, message)
+            .await
+            .context("failed to send Discord message")?
+            .id)
+    }
+
     /// Swaps the bot's 👀 on `message` in `origin` for ✅ or ❌; failures are only logged.
     async fn finish(&self, origin: ChannelId, message: MessageId, ok: bool) {
         let swap = async {
@@ -326,12 +343,34 @@ impl DiscordIo {
 
 impl Io for DiscordIo {
     async fn say(&mut self, text: &str) -> Result<()> {
+        // Notes after this reply start a new status message below it.
+        self.status = None;
         for chunk in chunks(text, MAX_MESSAGE_CHARS) {
-            self.channel
-                .say(&self.http, chunk)
-                .await
-                .context("failed to send Discord message")?;
+            self.send(CreateMessage::new().content(chunk)).await?;
         }
+        Ok(())
+    }
+
+    /// Shows `text` as small gray subtext, merging back-to-back notes into one edited message.
+    async fn note(&mut self, text: &str) -> Result<()> {
+        let first_line = text.lines().next().unwrap_or_default();
+        let line: String = format!("-# {first_line}")
+            .chars()
+            .take(MAX_STATUS_CHARS)
+            .collect();
+        if let Some((message, body)) = &mut self.status
+            && body.chars().count() + line.chars().count() < MAX_MESSAGE_CHARS
+        {
+            body.push('\n');
+            body.push_str(&line);
+            let edit = EditMessage::new().content(body.as_str());
+            if let Err(err) = self.channel.edit_message(&self.http, *message, edit).await {
+                tracing::warn!("failed to update status message: {err:#}");
+            }
+            return Ok(());
+        }
+        let message = self.send(CreateMessage::new().content(&line)).await?;
+        self.status = Some((message, line));
         Ok(())
     }
 
@@ -345,17 +384,15 @@ impl Io for DiscordIo {
                 .label("Deny")
                 .style(ButtonStyle::Danger),
         ]);
+        self.status = None;
         let message = self
-            .channel
-            .send_message(
-                &self.http,
+            .send(
                 CreateMessage::new()
                     .content(&block)
                     .components(vec![buttons]),
             )
             .await
-            .context("failed to send approval request")?
-            .id;
+            .context("failed to send approval request")?;
         let deadline = tokio::time::Instant::now() + CONFIRM_TIMEOUT;
         let run = loop {
             match tokio::time::timeout_at(deadline, self.inbox.recv()).await {

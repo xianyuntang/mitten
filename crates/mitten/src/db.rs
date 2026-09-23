@@ -15,6 +15,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/0002_rig_messages.sql"),
     include_str!("../migrations/0003_memories.sql"),
     include_str!("../migrations/0004_memories_per_conversation.sql"),
+    include_str!("../migrations/0005_archived_messages.sql"),
 ];
 
 /// Row of `conversations`.
@@ -144,7 +145,7 @@ impl Db {
         self.with_conn(move |conn| {
             let mut stmt = conn.prepare(
                 "SELECT id, conversation_id, role, content FROM messages
-                 WHERE conversation_id = ?1 ORDER BY id",
+                 WHERE conversation_id = ?1 AND archived = 0 ORDER BY id",
             )?;
             let rows = stmt.query_map(params![conversation_id], Message::from_row)?;
             Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
@@ -156,17 +157,22 @@ impl Db {
     pub async fn append(&self, conversation_id: i64, messages: Vec<Value>) -> Result<()> {
         self.with_conn(move |conn| {
             let tx = conn.transaction()?;
-            {
-                let mut stmt = tx.prepare(
-                    "INSERT INTO messages (conversation_id, role, content) VALUES (?1, ?2, ?3)",
-                )?;
-                for message in &messages {
-                    let Some(role) = message["role"].as_str() else {
-                        bail!("message without a role: {message}");
-                    };
-                    stmt.execute(params![conversation_id, role, message.to_string()])?;
-                }
-            }
+            insert_messages(&tx, conversation_id, &messages)?;
+            tx.commit()?;
+            Ok(())
+        })
+        .await
+    }
+
+    /// Replaces the conversation's live history with `messages`, archiving the old rows.
+    pub async fn rewrite(&self, conversation_id: i64, messages: Vec<Value>) -> Result<()> {
+        self.with_conn(move |conn| {
+            let tx = conn.transaction()?;
+            tx.execute(
+                "UPDATE messages SET archived = 1 WHERE conversation_id = ?1",
+                params![conversation_id],
+            )?;
+            insert_messages(&tx, conversation_id, &messages)?;
             tx.commit()?;
             Ok(())
         })
@@ -220,6 +226,18 @@ impl Db {
         })
         .await
     }
+}
+
+fn insert_messages(conn: &Connection, conversation_id: i64, messages: &[Value]) -> Result<()> {
+    let mut stmt =
+        conn.prepare("INSERT INTO messages (conversation_id, role, content) VALUES (?1, ?2, ?3)")?;
+    for message in messages {
+        let Some(role) = message["role"].as_str() else {
+            bail!("message without a role: {message}");
+        };
+        stmt.execute(params![conversation_id, role, message.to_string()])?;
+    }
+    Ok(())
 }
 
 fn migrate(conn: &mut Connection) -> Result<()> {
@@ -344,6 +362,36 @@ mod tests {
             )
             .expect("count");
         assert_eq!(count, 2);
+    }
+
+    #[tokio::test]
+    async fn rewrite_archives_old_rows() {
+        let db = Db::open_in_memory().expect("open");
+        let id = db.conversation("t").await.expect("create").id;
+        let old = vec![
+            json!({"role": "user", "content": "old"}),
+            json!({"role": "assistant", "content": "reply"}),
+        ];
+        db.append(id, old).await.expect("append");
+        let summary = vec![json!({"role": "user", "content": "summary"})];
+        db.rewrite(id, summary.clone()).await.expect("rewrite");
+        let live: Vec<Value> = db
+            .messages(id)
+            .await
+            .expect("load")
+            .into_iter()
+            .map(|m| m.content)
+            .collect();
+        assert_eq!(live, summary);
+        let conn = db.conn.lock().expect("lock");
+        let archived: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM messages WHERE archived = 1",
+                [],
+                |row| row.get(0),
+            )
+            .expect("count");
+        assert_eq!(archived, 2);
     }
 
     #[tokio::test]

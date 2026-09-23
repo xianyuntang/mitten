@@ -9,6 +9,9 @@ name = "minimax-m3"
 # api = "anthropic"
 # Optional. Default 16000.
 # max_tokens = 16000
+# Optional. When the conversation grows past about this many tokens, older turns are replaced by
+# a summary so requests stay within the model's context window. Default 100000.
+# compact_at_tokens = 100000
 
 [opencode-go]
 api_key = "your-opencode-api-key"

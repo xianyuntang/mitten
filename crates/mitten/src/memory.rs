@@ -141,9 +141,9 @@ pub fn describe(edit: &Edit, entries: &[Memory]) -> String {
             .to_owned()
     };
     match edit {
-        Edit::Add(text) => format!("remembered: {text}"),
-        Edit::Replace(_, text) => format!("updated memory: {text}"),
-        Edit::Remove(id) => format!("forgot: {}", old(id)),
+        Edit::Add(text) => format!("🧠 remembered: {text}"),
+        Edit::Replace(_, text) => format!("🧠 updated memory: {text}"),
+        Edit::Remove(id) => format!("🧠 forgot: {}", old(id)),
     }
 }
 

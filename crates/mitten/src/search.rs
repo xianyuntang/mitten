@@ -14,11 +14,23 @@ const TIMEOUT: Duration = Duration::from_secs(15);
 /// Snippet characters kept per result; titles and URLs are kept whole.
 const MAX_SNIPPET_CHARS: usize = 300;
 
+/// System prompt section, included only when `web_search` is available.
+pub const GUIDANCE: &str = "\
+# Web search
+When a question needs information from the web, search several times before answering; one \
+search is rarely enough. Start broad, then rephrase: different keywords and synonyms, more specific \
+terms (names, versions, error messages, dates), both English and the user's language, and \
+site:domain or \"exact phrase\" to target good sources. Compare what the results say and prefer \
+official or primary sources. If results are thin or disagree, keep searching with new queries \
+instead of guessing. Snippets are short excerpts; when you need a page's details, fetch it with bash \
+(curl). Name the URLs your answer relies on.";
+
 pub fn tool() -> ToolDefinition {
     ToolDefinition {
         name: "web_search".to_owned(),
         description: "Search the web for current information. Returns titles, URLs, and snippets. \
-                      Operators like site:example.com and \"exact phrase\" usually work."
+                      Operators like site:example.com and \"exact phrase\" usually work. \
+                      Call it several times with rephrased queries rather than relying on one."
             .to_owned(),
         parameters: json!({
             "type": "object",

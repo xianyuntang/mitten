@@ -9,6 +9,7 @@ use serde::Deserialize;
 const DEFAULT_BASE_URL: &str = "https://opencode.ai/zen/go/v1";
 const DEFAULT_MODEL: &str = "minimax-m3";
 const DEFAULT_MAX_TOKENS: u32 = 16_000;
+const DEFAULT_COMPACT_AT_TOKENS: usize = 100_000;
 
 /// Which OpenCode Go endpoint format a model speaks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -79,6 +80,8 @@ struct ModelSection {
     /// Wire format; inferred from the model name when omitted.
     api: Option<Api>,
     max_tokens: Option<u32>,
+    /// Estimated history size that triggers compaction.
+    compact_at_tokens: Option<usize>,
 }
 
 /// OpenCode Go serves MiniMax and Qwen models through an Anthropic-format Messages endpoint.
@@ -201,6 +204,8 @@ pub struct DiscordSection {
 pub struct Config {
     pub model: String,
     pub max_tokens: u32,
+    /// Estimated history size (tokens) at which older turns are summarized.
+    pub compact_at_tokens: usize,
     pub api_key: Secret,
     pub api: Api,
     /// OpenCode Go base URL, e.g. `https://opencode.ai/zen/go/v1`.
@@ -245,11 +250,19 @@ impl Config {
             .base_url
             .unwrap_or_else(|| DEFAULT_BASE_URL.to_owned());
 
+        let compact_at_tokens = file
+            .model
+            .compact_at_tokens
+            .unwrap_or(DEFAULT_COMPACT_AT_TOKENS);
+        if compact_at_tokens < 10_000 {
+            bail!("model.compact_at_tokens must be at least 10000");
+        }
         let model = file.model.name.unwrap_or_else(|| DEFAULT_MODEL.to_owned());
         Ok(Self {
             api: file.model.api.unwrap_or_else(|| Api::for_model(&model)),
             model,
             max_tokens: file.model.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS),
+            compact_at_tokens,
             api_key: file.opencode_go.api_key,
             base_url: base_url.trim_end_matches('/').to_owned(),
             bash_timeout: Duration::from_secs(file.tools.bash.timeout_secs),
@@ -288,6 +301,7 @@ mod tests {
         .expect("valid");
         assert_eq!(config.model, "minimax-m3");
         assert_eq!(config.max_tokens, 16_000);
+        assert_eq!(config.compact_at_tokens, 100_000);
         assert_eq!(config.base_url, "http://localhost:8080/v1");
         assert_eq!(Api::for_model("glm-5.3"), Api::Openai);
         assert_eq!(config.bash_timeout, Duration::from_secs(120));
