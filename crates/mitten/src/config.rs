@@ -10,6 +10,28 @@ const DEFAULT_BASE_URL: &str = "https://opencode.ai/zen/go/v1";
 const DEFAULT_MODEL: &str = "minimax-m3";
 const DEFAULT_MAX_TOKENS: u32 = 16_000;
 
+/// Which OpenCode Go endpoint format a model speaks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Api {
+    /// `/messages`: MiniMax and Qwen.
+    Anthropic,
+    /// `/chat/completions`: GLM, Kimi, DeepSeek, and the rest.
+    Openai,
+}
+
+impl Api {
+    /// OpenCode Go serves MiniMax and Qwen in Anthropic format and most others as chat completions.
+    // ponytail: name-prefix guess; set `model.api` for anything it gets wrong.
+    pub fn for_model(model: &str) -> Self {
+        if model.starts_with("minimax") || model.starts_with("qwen") {
+            Self::Anthropic
+        } else {
+            Self::Openai
+        }
+    }
+}
+
 /// API key or token whose `Debug` output is redacted.
 #[derive(Clone, Deserialize)]
 #[serde(transparent)]
@@ -54,6 +76,8 @@ struct DatabaseSection {
 #[serde(deny_unknown_fields)]
 struct ModelSection {
     name: Option<String>,
+    /// Wire format; inferred from the model name when omitted.
+    api: Option<Api>,
     max_tokens: Option<u32>,
 }
 
@@ -129,8 +153,9 @@ pub struct Config {
     pub model: String,
     pub max_tokens: u32,
     pub api_key: Secret,
-    /// Full Messages endpoint, e.g. `https://opencode.ai/zen/go/v1/messages`.
-    pub messages_url: String,
+    pub api: Api,
+    /// OpenCode Go base URL, e.g. `https://opencode.ai/zen/go/v1`.
+    pub base_url: String,
     pub bash_timeout: Duration,
     /// `tracing` filter directive, e.g. `warn` or `mitten=debug`.
     pub log_level: String,
@@ -169,11 +194,13 @@ impl Config {
             .base_url
             .unwrap_or_else(|| DEFAULT_BASE_URL.to_owned());
 
+        let model = file.model.name.unwrap_or_else(|| DEFAULT_MODEL.to_owned());
         Ok(Self {
-            model: file.model.name.unwrap_or_else(|| DEFAULT_MODEL.to_owned()),
+            api: file.model.api.unwrap_or_else(|| Api::for_model(&model)),
+            model,
             max_tokens: file.model.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS),
             api_key: file.opencode_go.api_key,
-            messages_url: format!("{}/messages", base_url.trim_end_matches('/')),
+            base_url: base_url.trim_end_matches('/').to_owned(),
             bash_timeout: Duration::from_secs(file.tools.bash.timeout_secs),
             log_level: file.log.level,
             discord: file.discord,
@@ -189,10 +216,8 @@ mod tests {
     #[test]
     fn example_config_parses() {
         let config = Config::parse(include_str!("../../../config.example.toml")).expect("valid");
-        assert_eq!(
-            config.messages_url,
-            "https://opencode.ai/zen/go/v1/messages"
-        );
+        assert_eq!(config.base_url, "https://opencode.ai/zen/go/v1");
+        assert_eq!(config.api, Api::Anthropic);
     }
 
     #[test]
@@ -207,7 +232,8 @@ mod tests {
         .expect("valid");
         assert_eq!(config.model, "minimax-m3");
         assert_eq!(config.max_tokens, 16_000);
-        assert_eq!(config.messages_url, "http://localhost:8080/v1/messages");
+        assert_eq!(config.base_url, "http://localhost:8080/v1");
+        assert_eq!(Api::for_model("glm-5.3"), Api::Openai);
         assert_eq!(config.bash_timeout, Duration::from_secs(120));
         assert_eq!(config.log_level, "warn");
         assert!(config.discord.is_none());

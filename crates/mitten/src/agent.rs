@@ -1,12 +1,20 @@
-//! Agent loop: OpenCode Go's Anthropic-format Messages API + a client-side bash tool.
+//! Agent loop over OpenCode Go via Rig's provider clients, with a user-approved bash tool.
 
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
+use reqwest::header::{HeaderMap, HeaderValue};
+use rig_core::client::CompletionClient;
+use rig_core::completion::{
+    CompletionError, CompletionModel, CompletionRequest, CompletionResponse, FinishReason,
+    ToolDefinition,
+};
+use rig_core::message::{AssistantContent, Message, ToolCall, ToolResultContent, UserContent};
+use rig_core::providers::{anthropic, openai};
 use serde_json::{Value, json};
 use tokio::process::Command;
 
-use crate::config::Config;
+use crate::config::{Api, Config};
 use crate::db::Db;
 
 // ponytail: hard cap on tool output fed back to the model; summarize or page if it bites.
@@ -20,15 +28,113 @@ pub trait Io {
     async fn confirm(&mut self, command: &str) -> Result<bool>;
 }
 
+type AnthropicModel = <anthropic::Client as CompletionClient>::CompletionModel;
+type OpenaiModel = <openai::CompletionsClient as CompletionClient>::CompletionModel;
+
+/// The configured model behind whichever OpenCode Go endpoint it speaks.
+enum Model {
+    Anthropic(AnthropicModel),
+    Openai(OpenaiModel),
+}
+
+impl Model {
+    /// `session` goes out as `x-opencode-session` so OpenCode Go can route and cache per conversation.
+    fn new(config: &Config, session: &str) -> Result<Self> {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-opencode-session",
+            HeaderValue::from_str(session).context("invalid session id")?,
+        );
+        // OpenCode Go asks clients to name themselves instead of sending a generic HTTP-library agent.
+        let http = reqwest::Client::builder()
+            .user_agent(concat!("mitten/", env!("CARGO_PKG_VERSION")))
+            .build()
+            .context("failed to build HTTP client")?;
+        let key = config.api_key.as_str();
+        Ok(match config.api {
+            Api::Anthropic => Self::Anthropic(
+                anthropic::Client::builder()
+                    .api_key(key)
+                    .base_url(&config.base_url)
+                    .http_client(http)
+                    .http_headers(headers)
+                    .build()
+                    .context("failed to build Anthropic-format client")?
+                    .completion_model(&config.model),
+            ),
+            Api::Openai => Self::Openai(
+                openai::Client::builder()
+                    .api_key(key)
+                    .base_url(&config.base_url)
+                    .http_client(http)
+                    .http_headers(headers)
+                    .build()
+                    .context("failed to build OpenAI-format client")?
+                    .completions_api()
+                    .completion_model(&config.model),
+            ),
+        })
+    }
+
+    async fn complete(
+        &self,
+        request: CompletionRequest,
+    ) -> Result<CompletionResponse, CompletionError> {
+        match self {
+            Self::Anthropic(model) => model.completion(request).await,
+            Self::Openai(model) => model.completion(request).await,
+        }
+    }
+}
+
+impl std::fmt::Debug for Model {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Anthropic(_) => "Model::Anthropic",
+            Self::Openai(_) => "Model::Openai",
+        })
+    }
+}
+
+fn bash_tool() -> ToolDefinition {
+    ToolDefinition {
+        name: "bash".to_owned(),
+        description: "Run a bash command on the user's machine and return stdout, stderr, and the exit status.".to_owned(),
+        parameters: json!({
+            "type": "object",
+            "properties": {"command": {"type": "string", "description": "The bash command to run."}},
+            "required": ["command"],
+        }),
+    }
+}
+
+fn request(config: &Config, system: &str, messages: &[Message]) -> CompletionRequest {
+    CompletionRequest {
+        model: None,
+        preamble: None,
+        chat_history: std::iter::once(Message::system(system))
+            .chain(messages.iter().cloned())
+            .collect(),
+        documents: Vec::new(),
+        tools: vec![bash_tool()],
+        temperature: None,
+        max_tokens: Some(u64::from(config.max_tokens)),
+        tool_choice: None,
+        additional_params: None,
+        output_schema: None,
+        record_telemetry_content: false,
+    }
+}
+
 /// One conversation, kept in memory for the process lifetime.
 #[derive(Debug)]
 pub struct Agent {
-    http: reqwest::Client,
+    model: Model,
     config: Config,
     db: Db,
     conversation_id: i64,
     system: String,
-    messages: Vec<Value>,
+    messages: Vec<Message>,
 }
 
 impl Agent {
@@ -38,9 +144,10 @@ impl Agent {
         let messages = db
             .messages(conversation.id)
             .await?
-            .iter()
-            .map(crate::db::Message::to_api)
-            .collect();
+            .into_iter()
+            .map(|row| serde_json::from_value(row.content))
+            .collect::<Result<Vec<Message>, _>>()
+            .context("stored conversation is unreadable; send /new to start over")?;
         let cwd = std::env::current_dir().context("failed to read current directory")?;
         let system = format!(
             "You are Mitten, a personal agent running on the user's machine ({os}). \
@@ -50,7 +157,7 @@ impl Agent {
             cwd = cwd.display(),
         );
         Ok(Self {
-            http: http_client()?,
+            model: Model::new(&config, &format!("mitten-{}", conversation.id))?,
             config,
             db,
             conversation_id: conversation.id,
@@ -71,8 +178,12 @@ impl Agent {
             self.messages.truncate(turn_start);
             return Err(err);
         }
+        let turn = self.messages[turn_start..]
+            .iter()
+            .map(serde_json::to_value)
+            .collect::<Result<Vec<Value>, _>>()?;
         self.db
-            .append(self.conversation_id, self.messages[turn_start..].to_vec())
+            .append(self.conversation_id, turn)
             .await
             .context("failed to save the conversation")
     }
@@ -85,154 +196,94 @@ impl Agent {
     }
 
     async fn drive(&mut self, prompt: &str, io: &mut impl Io) -> Result<()> {
-        self.messages
-            .push(json!({"role": "user", "content": prompt}));
+        self.messages.push(Message::user(prompt));
         loop {
-            let response = self.call().await?;
-            let stop_reason = response["stop_reason"].as_str().unwrap_or_default();
-            match stop_reason {
-                "refusal" => bail!("the model declined this request (stop_reason: refusal)"),
-                "max_tokens" => bail!("response hit max_tokens ({})", self.config.max_tokens),
+            let response = self
+                .model
+                .complete(request(&self.config, &self.system, &self.messages))
+                .await
+                .context("model request failed")?;
+            match response.finish_reason() {
+                Some(FinishReason::Length) => {
+                    bail!("response hit max_tokens ({})", self.config.max_tokens)
+                }
+                Some(FinishReason::ContentFilter) => bail!("the provider filtered this response"),
                 _ => {}
             }
+            if response.choice.is_empty() {
+                bail!("the model returned an empty response");
+            }
 
-            let content = response["content"].clone();
-            for block in content.as_array().into_iter().flatten() {
-                if let Some(text) = block["text"].as_str().filter(|_| block["type"] == "text") {
-                    io.say(text).await?;
+            let mut calls: Vec<ToolCall> = Vec::new();
+            for content in &response.choice {
+                match content {
+                    AssistantContent::Text(text) if !text.text().trim().is_empty() => {
+                        io.say(text.text()).await?;
+                    }
+                    AssistantContent::ToolCall(call) => calls.push(call.clone()),
+                    _ => {}
                 }
             }
-            // Append the full content (thinking blocks included) unchanged.
-            self.messages
-                .push(json!({"role": "assistant", "content": content}));
-
-            if stop_reason != "tool_use" {
+            // Keep the full content (reasoning included) so the provider can replay it.
+            self.messages.push(Message::Assistant {
+                id: response.message_id.clone(),
+                content: response.choice,
+            });
+            if calls.is_empty() {
                 return Ok(());
             }
 
             let mut results = Vec::new();
-            for block in content.as_array().into_iter().flatten() {
-                if block["type"] == "tool_use" {
-                    results.push(run_tool(block, io, self.config.bash_timeout).await?);
-                }
+            for call in &calls {
+                let output = run_tool(call, io, self.config.bash_timeout).await?;
+                results.push(UserContent::tool_result_for(
+                    call.id.clone(),
+                    call.provider.clone(),
+                    call.function.name.clone(),
+                    vec![ToolResultContent::text(output)],
+                ));
             }
             // All tool results go back in a single user message.
-            self.messages
-                .push(json!({"role": "user", "content": results}));
+            self.messages.push(Message::User { content: results });
         }
-    }
-
-    async fn call(&self) -> Result<Value> {
-        let session = format!("mitten-{}", self.conversation_id);
-        send(
-            &self.http,
-            &self.config,
-            &session,
-            &self.system,
-            &self.messages,
-        )
-        .await
     }
 }
 
 /// Sends one tiny request to check the key and model work; returns the model's reply.
 pub async fn ping(config: &Config) -> Result<String> {
-    let messages = [json!({"role": "user", "content": "Reply with the single word OK."})];
-    let response = send(
-        &http_client()?,
-        config,
-        "mitten-ping",
-        "You are a connectivity check.",
-        &messages,
-    )
-    .await?;
-    let text = response["content"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter_map(|block| block["text"].as_str())
-        .collect::<Vec<_>>()
-        .join("");
-    Ok(text)
+    let model = Model::new(config, "mitten-ping")?;
+    let messages = [Message::user("Reply with the single word OK.")];
+    let response = model
+        .complete(request(config, "You are a connectivity check.", &messages))
+        .await?;
+    Ok(response
+        .choice
+        .iter()
+        .filter_map(|content| match content {
+            AssistantContent::Text(text) => Some(text.text()),
+            _ => None,
+        })
+        .collect())
 }
 
-fn http_client() -> Result<reqwest::Client> {
-    // OpenCode Go asks clients to name themselves instead of sending a generic HTTP-library agent.
-    reqwest::Client::builder()
-        .user_agent(concat!("mitten/", env!("CARGO_PKG_VERSION")))
-        .build()
-        .context("failed to build HTTP client")
-}
-
-/// Calls OpenCode Go's Messages endpoint. `session` identifies the conversation for routing and caching.
-#[tracing::instrument(skip_all, fields(model = %config.model, messages = messages.len()))]
-async fn send(
-    http: &reqwest::Client,
-    config: &Config,
-    session: &str,
-    system: &str,
-    messages: &[Value],
-) -> Result<Value> {
-    let body = json!({
-        "model": config.model,
-        "max_tokens": config.max_tokens,
-        "system": system,
-        "messages": messages,
-        "tools": [{
-            "name": "bash",
-            "description": "Run a bash command on the user's machine and return stdout, stderr, and the exit status.",
-            "input_schema": {
-                "type": "object",
-                "properties": {"command": {"type": "string", "description": "The bash command to run."}},
-                "required": ["command"],
-            },
-        }],
-    });
-    let request = http
-        .post(&config.messages_url)
-        .header("anthropic-version", "2023-06-01")
-        // The Anthropic-format endpoint reads `x-api-key`; a Bearer token gets "Missing API key".
-        .header("x-api-key", config.api_key.as_str())
-        .header("x-opencode-session", session);
-
-    let response = request
-        .json(&body)
-        .send()
-        .await
-        .context("failed to reach the model API")?;
-    let status = response.status();
-    let text = response
-        .text()
-        .await
-        .context("failed to read API response")?;
-    if !status.is_success() {
-        bail!("model API returned {status}: {text}");
+/// Runs one tool call after asking the user; failures are reported to the model as text.
+async fn run_tool(call: &ToolCall, io: &mut impl Io, bash_timeout: Duration) -> Result<String> {
+    if call.function.name != "bash" {
+        return Ok(format!("error: unknown tool `{}`", call.function.name));
     }
-    tracing::debug!(%status, "API call succeeded");
-    serde_json::from_str(&text).context("failed to parse API response")
-}
-
-/// Executes one tool call after asking the user, and returns its `tool_result` block.
-async fn run_tool(block: &Value, io: &mut impl Io, bash_timeout: Duration) -> Result<Value> {
-    let id = block["id"].as_str().unwrap_or_default();
-    let tool_input = &block["input"];
-
-    let (output, is_error) = match block["name"].as_str().unwrap_or_default() {
-        // ponytail: each command runs in a fresh shell; keep a persistent shell if state across calls matters.
-        "bash" => match tool_input["command"].as_str() {
-            Some(command) if io.confirm(command).await? => execute(command, bash_timeout).await,
-            Some(_) => ("the user denied this command".to_owned(), true),
-            None => ("missing `command` in bash tool input".to_owned(), true),
-        },
-        other => (format!("unknown tool `{other}`"), true),
+    // ponytail: each command runs in a fresh shell; keep a persistent shell if state across calls matters.
+    let Some(command) = call.function.arguments["command"].as_str() else {
+        return Ok("error: missing `command` in bash tool input".to_owned());
     };
-
-    Ok(json!({
-        "type": "tool_result",
-        "tool_use_id": id,
-        "content": output,
-        "is_error": is_error,
-    }))
+    if !io.confirm(command).await? {
+        return Ok("error: the user denied this command".to_owned());
+    }
+    let (output, is_error) = execute(command, bash_timeout).await;
+    Ok(if is_error {
+        format!("error:\n{output}")
+    } else {
+        output
+    })
 }
 
 async fn execute(command: &str, timeout: Duration) -> (String, bool) {

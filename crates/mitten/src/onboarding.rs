@@ -15,14 +15,18 @@ use tokio::runtime::Handle;
 use crate::agent;
 use crate::config::Config;
 
-/// OpenCode Go models served in Anthropic format; the others need `/chat/completions`.
+/// Common OpenCode Go models; `config::Api::for_model` picks each one's endpoint format.
 const MODELS: &[&str] = &[
     "minimax-m3",
     "minimax-m2.7",
     "qwen3.8-max",
     "qwen3.8-flash",
-    "qwen3.7-max",
-    "qwen3.7-plus",
+    "glm-5.3",
+    "glm-5.3-flash",
+    "kimi-k3",
+    "kimi-k2.7-code",
+    "deepseek-v4-pro",
+    "deepseek-v4.1-flash",
 ];
 const CUSTOM: &str = "Custom…";
 const ENABLED: &str = "Enabled";

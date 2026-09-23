@@ -5,10 +5,13 @@ use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result, anyhow, bail};
 use rusqlite::{Connection, Row, params};
-use serde_json::{Value, json};
+use serde_json::Value;
 
 /// Applied in order; `user_version` records how many have run. Append only, never edit.
-const MIGRATIONS: &[&str] = &[include_str!("../migrations/0001_conversations.sql")];
+const MIGRATIONS: &[&str] = &[
+    include_str!("../migrations/0001_conversations.sql"),
+    include_str!("../migrations/0002_rig_messages.sql"),
+];
 
 /// Row of `conversations`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -26,7 +29,7 @@ impl Conversation {
     }
 }
 
-/// Row of `messages`.
+/// Row of `messages`; `content` is the whole message as JSON, `role` is copied out for queries.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Message {
     pub id: i64,
@@ -50,11 +53,6 @@ impl Message {
                 )
             })?,
         })
-    }
-
-    /// The message in Messages API shape.
-    pub fn to_api(&self) -> Value {
-        json!({"role": self.role, "content": self.content})
     }
 }
 
@@ -134,7 +132,7 @@ impl Db {
         .await
     }
 
-    /// Appends API-shaped messages (`{"role", "content"}`) in one transaction.
+    /// Appends messages (JSON objects with a `role`) in one transaction.
     pub async fn append(&self, conversation_id: i64, messages: Vec<Value>) -> Result<()> {
         self.with_conn(move |conn| {
             let tx = conn.transaction()?;
@@ -146,11 +144,7 @@ impl Db {
                     let Some(role) = message["role"].as_str() else {
                         bail!("message without a role: {message}");
                     };
-                    stmt.execute(params![
-                        conversation_id,
-                        role,
-                        message["content"].to_string()
-                    ])?;
+                    stmt.execute(params![conversation_id, role, message.to_string()])?;
                 }
             }
             tx.commit()?;
@@ -196,6 +190,7 @@ fn migrate(conn: &mut Connection) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     #[tokio::test]
     async fn migrations_are_idempotent_and_messages_round_trip() {
@@ -226,8 +221,8 @@ mod tests {
             .messages(conversation.id)
             .await
             .expect("load")
-            .iter()
-            .map(Message::to_api)
+            .into_iter()
+            .map(|m| m.content)
             .collect();
         assert_eq!(stored, turn);
 
