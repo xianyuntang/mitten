@@ -31,7 +31,7 @@ const MODELS: &[&str] = &[
 const CUSTOM: &str = "Custom…";
 const ENABLED: &str = "Enabled";
 const DISABLED: &str = "Disabled";
-const STEPS: [&str; 3] = ["Model", "Discord", "Advanced"];
+const STEPS: [&str; 4] = ["Model", "Discord", "Web search", "Advanced"];
 const PING_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Shows the setup, tests the connection, and saves the config to `path`.
@@ -75,9 +75,13 @@ const CUSTOM_MODEL: usize = 3;
 const DISCORD: usize = 4;
 const TOKEN: usize = 5;
 const USERS: usize = 6;
-const TIMEOUT: usize = 7;
-const LOG: usize = 8;
-const DATABASE: usize = 9;
+const SEARCH: usize = 7;
+const SEARCH_URL: usize = 8;
+const SEARCH_USER: usize = 9;
+const SEARCH_PASSWORD: usize = 10;
+const TIMEOUT: usize = 11;
+const LOG: usize = 12;
+const DATABASE: usize = 13;
 
 /// Focus value for the Next / Save button under the fields.
 const BUTTON: usize = usize::MAX;
@@ -92,6 +96,8 @@ struct Form {
     status: Line<'static>,
     /// Set after a failed connection test; the next save skips the test.
     force_save: bool,
+    /// `tools.searxng.results`, not on the form; kept so saving doesn't reset a hand-edited value.
+    search_results: usize,
 }
 
 fn options(values: &[&str]) -> Vec<String> {
@@ -110,6 +116,8 @@ fn options_with(values: &[&str], current: &str) -> Vec<String> {
 impl Form {
     fn new(current: Option<&Config>) -> Result<Self> {
         let discord = current.and_then(|c| c.discord.as_ref());
+        let searxng = current.and_then(|c| c.searxng.as_ref());
+        let search_auth = searxng.and_then(|s| s.auth.as_ref());
         let model = current.map_or(MODELS[0], |c| c.model.as_str());
         let preset = MODELS.contains(&model);
         let timeout = current
@@ -190,18 +198,46 @@ impl Form {
             ),
             field(
                 2,
+                "Web search",
+                Kind::Select(options(&[DISABLED, ENABLED])),
+                if searxng.is_some() { ENABLED } else { DISABLED }.to_owned(),
+            ),
+            field(
+                2,
+                "SearXNG URL",
+                Kind::Text,
+                searxng.map(|s| s.url.clone()).unwrap_or_default(),
+            ),
+            field(
+                2,
+                "Username",
+                Kind::Text,
+                search_auth
+                    .map(|(user, _)| user.clone())
+                    .unwrap_or_default(),
+            ),
+            field(
+                2,
+                "Password",
+                Kind::Secret,
+                search_auth
+                    .map(|(_, password)| password.as_str().to_owned())
+                    .unwrap_or_default(),
+            ),
+            field(
+                3,
                 "Bash timeout (s)",
                 Kind::Select(options_with(&["30", "60", "120", "300", "600"], &timeout)),
                 timeout,
             ),
             field(
-                2,
+                3,
                 "Log level",
                 Kind::Select(options_with(&["error", "warn", "info", "debug"], log)),
                 log.to_owned(),
             ),
             field(
-                2,
+                3,
                 "Database",
                 Kind::Text,
                 database.to_string_lossy().into_owned(),
@@ -215,6 +251,7 @@ impl Form {
             reveal: false,
             status: Line::default(),
             force_save: false,
+            search_results: searxng.map_or(5, |s| s.results),
         })
     }
 
@@ -224,6 +261,7 @@ impl Form {
             && match i {
                 CUSTOM_MODEL => self.fields[MODEL].value == CUSTOM,
                 TOKEN | USERS => self.fields[DISCORD].value == ENABLED,
+                SEARCH_URL | SEARCH_USER | SEARCH_PASSWORD => self.fields[SEARCH].value == ENABLED,
                 _ => true,
             }
     }
@@ -396,6 +434,9 @@ impl Form {
             1 => {
                 self.discord()?;
             }
+            2 => {
+                self.search()?;
+            }
             _ => {
                 self.timeout()?;
                 self.required(DATABASE)?;
@@ -422,6 +463,26 @@ impl Form {
         }))
     }
 
+    fn search(&self) -> std::result::Result<Option<SearchAnswers>, String> {
+        if self.fields[SEARCH].value != ENABLED {
+            return Ok(None);
+        }
+        let url = self.required(SEARCH_URL)?;
+        if !url.starts_with("http://") && !url.starts_with("https://") {
+            return Err("SearXNG URL must start with http:// or https://".to_owned());
+        }
+        let auth = match (self.value(SEARCH_USER), self.value(SEARCH_PASSWORD)) {
+            (user, password) if user.is_empty() && password.is_empty() => None,
+            (user, password) if !user.is_empty() && !password.is_empty() => Some((user, password)),
+            _ => return Err("fill in both Username and Password, or leave both empty".to_owned()),
+        };
+        Ok(Some(SearchAnswers {
+            url,
+            auth,
+            results: self.search_results,
+        }))
+    }
+
     fn timeout(&self) -> std::result::Result<u64, String> {
         self.value(TIMEOUT)
             .parse()
@@ -433,6 +494,7 @@ impl Form {
             api_key: self.required(KEY)?,
             model: self.model()?,
             discord: self.discord()?,
+            search: self.search()?,
             bash_timeout_secs: self.timeout()?,
             log_level: self.required(LOG)?,
             database: PathBuf::from(self.required(DATABASE)?),
@@ -586,10 +648,17 @@ fn default_database_path() -> Result<PathBuf> {
         .join(".local/share/mitten/mitten.db"))
 }
 
+struct SearchAnswers {
+    url: String,
+    auth: Option<(String, String)>,
+    results: usize,
+}
+
 struct Answers {
     model: String,
     api_key: String,
     discord: Option<DiscordAnswers>,
+    search: Option<SearchAnswers>,
     bash_timeout_secs: u64,
     log_level: String,
     database: PathBuf,
@@ -624,6 +693,20 @@ fn render_toml(answers: &Answers) -> String {
         log = quote(&answers.log_level),
         db = quote(&answers.database.to_string_lossy()),
     );
+    if let Some(search) = &answers.search {
+        text.push_str(&format!(
+            "\n[tools.searxng]\nurl = {}\nresults = {}\n",
+            quote(&search.url),
+            search.results
+        ));
+        if let Some((user, password)) = &search.auth {
+            text.push_str(&format!(
+                "username = {}\npassword = {}\n",
+                quote(user),
+                quote(password)
+            ));
+        }
+    }
     if let Some(discord) = &answers.discord {
         let users = discord
             .allowed_users
@@ -679,6 +762,11 @@ mod tests {
                 token: "tok".to_owned(),
                 allowed_users: vec![1, 22],
             }),
+            search: Some(SearchAnswers {
+                url: "https://search.example.com".to_owned(),
+                auth: Some(("me".to_owned(), "p\"w".to_owned())),
+                results: 8,
+            }),
             bash_timeout_secs: 60,
             log_level: "info".to_owned(),
             database: PathBuf::from("/tmp/m.db"),
@@ -688,6 +776,11 @@ mod tests {
         assert_eq!(config.api_key.as_str(), "sk-\"quoted\"");
         assert_eq!(config.bash_timeout.as_secs(), 60);
         assert_eq!(config.discord.map(|d| d.allowed_users), Some(vec![1, 22]));
+        let searxng = config.searxng.expect("search section");
+        assert_eq!(searxng.url, "https://search.example.com");
+        assert_eq!(searxng.results, 8);
+        let (user, password) = searxng.auth.expect("basic auth");
+        assert_eq!((user.as_str(), password.as_str()), ("me", "p\"w"));
     }
 
     #[test]
@@ -713,6 +806,18 @@ mod tests {
         form.fields[USERS].value = "12, x".to_owned();
         assert!(form.check_step().is_err());
         form.fields[USERS].value = "12, 34".to_owned();
+
+        form.step = 2;
+        assert!(!form.visible().contains(&SEARCH_URL));
+        form.fields[SEARCH].value = ENABLED.to_owned();
+        assert!(form.visible().contains(&SEARCH_PASSWORD));
+        form.fields[SEARCH_URL].value = "search.example.com".to_owned();
+        assert!(form.check_step().is_err(), "URL needs a scheme");
+        form.fields[SEARCH_URL].value = "https://search.example.com".to_owned();
+        form.fields[SEARCH_USER].value = "me".to_owned();
+        assert!(form.check_step().is_err(), "username without password");
+        form.fields[SEARCH_PASSWORD].value = "pw".to_owned();
+        form.check_step().expect("search step valid");
 
         let answers = form.answers().expect("all steps valid");
         assert_eq!(answers.model, "qwen-next");

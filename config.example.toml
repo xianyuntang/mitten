@@ -18,6 +18,16 @@ api_key = "your-opencode-api-key"
 [tools.bash]
 timeout_secs = 120
 
+# Optional. Enables the `web_search` tool through your SearXNG instance.
+# Its settings.yml must list `json` under search.formats, or searches get HTTP 403.
+# [tools.searxng]
+# url = "https://search.example.com"
+# # Optional basic auth; set both or neither. Use https so the password isn't sent in the clear.
+# username = "me"
+# password = "secret"
+# # Optional. Results per search, 1-20. Default 5.
+# results = 5
+
 [log]
 # tracing filter, e.g. "warn", "info", "mitten=debug".
 level = "warn"

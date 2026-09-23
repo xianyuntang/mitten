@@ -94,6 +94,55 @@ struct OpenCodeGoSection {
 struct ToolsSection {
     #[serde(default)]
     bash: BashSection,
+    searxng: Option<SearxngSection>,
+}
+
+/// `[tools.searxng]`: a SearXNG instance for the `web_search` tool, optionally behind basic auth.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SearxngSection {
+    url: String,
+    username: Option<String>,
+    password: Option<Secret>,
+    #[serde(default = "SearxngSection::default_results")]
+    results: usize,
+}
+
+impl SearxngSection {
+    fn default_results() -> usize {
+        5
+    }
+
+    fn validate(self) -> Result<Searxng> {
+        let url = self.url.trim_end_matches('/').to_owned();
+        if !url.starts_with("http://") && !url.starts_with("https://") {
+            bail!("tools.searxng.url must start with http:// or https://");
+        }
+        let auth = match (self.username, self.password) {
+            (Some(user), Some(password)) => Some((user, password)),
+            (None, None) => None,
+            _ => bail!("tools.searxng needs both username and password for basic auth, or neither"),
+        };
+        if !(1..=20).contains(&self.results) {
+            bail!("tools.searxng.results must be between 1 and 20");
+        }
+        Ok(Searxng {
+            url,
+            auth,
+            results: self.results,
+        })
+    }
+}
+
+/// Validated `[tools.searxng]`.
+#[derive(Debug, Clone)]
+pub struct Searxng {
+    /// Base URL without a trailing slash; `/search` is appended.
+    pub url: String,
+    /// Basic auth username and password.
+    pub auth: Option<(String, Secret)>,
+    /// How many results `web_search` returns.
+    pub results: usize,
 }
 
 #[derive(Debug, Deserialize)]
@@ -157,6 +206,8 @@ pub struct Config {
     /// OpenCode Go base URL, e.g. `https://opencode.ai/zen/go/v1`.
     pub base_url: String,
     pub bash_timeout: Duration,
+    /// Enables the `web_search` tool when set.
+    pub searxng: Option<Searxng>,
     /// `tracing` filter directive, e.g. `warn` or `mitten=debug`.
     pub log_level: String,
     pub discord: Option<DiscordSection>,
@@ -202,6 +253,11 @@ impl Config {
             api_key: file.opencode_go.api_key,
             base_url: base_url.trim_end_matches('/').to_owned(),
             bash_timeout: Duration::from_secs(file.tools.bash.timeout_secs),
+            searxng: file
+                .tools
+                .searxng
+                .map(SearxngSection::validate)
+                .transpose()?,
             log_level: file.log.level,
             discord: file.discord,
             database_path,
@@ -243,6 +299,33 @@ mod tests {
                 .ends_with(".local/share/mitten/mitten.db")
         );
         assert!(!format!("{config:?}").contains("sk-secret"));
+    }
+
+    #[test]
+    fn searxng_section_validates_auth_pairs() {
+        let base = "[opencode-go]\napi_key = \"k\"\n[tools.searxng]\n";
+        let config = Config::parse(&format!(
+            "{base}url = \"https://search.example.com/\"\nusername = \"me\"\npassword = \"pw\""
+        ))
+        .expect("valid");
+        let searxng = config.searxng.expect("configured");
+        assert_eq!(searxng.url, "https://search.example.com");
+        assert_eq!(searxng.results, 5);
+        assert_eq!(searxng.auth.map(|(user, _)| user).as_deref(), Some("me"));
+        assert!(Config::parse(&format!("{base}url = \"http://x\"\npassword = \"pw\"")).is_err());
+        assert!(
+            !format!(
+                "{:?}",
+                Config::parse(&format!(
+                    "{base}url = \"http://x\"\nusername = \"me\"\npassword = \"pw\""
+                ))
+                .expect("valid")
+            )
+            .contains("\"pw\"")
+        );
+        assert!(Config::parse(&format!("{base}url = \"http://x\"\nusername = \"me\"")).is_err());
+        assert!(Config::parse(&format!("{base}url = \"x\"")).is_err());
+        assert!(Config::parse(&format!("{base}url = \"http://x\"\nresults = 0")).is_err());
     }
 
     #[test]

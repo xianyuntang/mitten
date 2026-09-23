@@ -5,6 +5,7 @@ mod db;
 mod discord;
 mod memory;
 mod onboarding;
+mod search;
 mod service;
 
 use std::io::IsTerminal;

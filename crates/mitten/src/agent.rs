@@ -17,6 +17,8 @@ use tokio::process::Command;
 use crate::config::{Api, Config};
 use crate::db::Db;
 use crate::memory;
+use crate::search;
+use crate::search::WebSearch;
 
 // ponytail: hard cap on tool output fed back to the model; summarize or page if it bites.
 const MAX_OUTPUT_CHARS: usize = 30_000;
@@ -197,7 +199,10 @@ fn request(config: &Config, system: &str, messages: &[Message]) -> CompletionReq
             .chain(messages.iter().cloned())
             .collect(),
         documents: Vec::new(),
-        tools: vec![bash_tool(), memory::tool()],
+        tools: [bash_tool(), memory::tool()]
+            .into_iter()
+            .chain(config.searxng.is_some().then(search::tool))
+            .collect(),
         temperature: None,
         max_tokens: Some(u64::from(config.max_tokens)),
         tool_choice: None,
@@ -216,6 +221,8 @@ pub struct Agent {
     conversation_id: i64,
     /// Conversation whose memory this one reads and writes; a Discord thread uses its parent channel's.
     memory_id: i64,
+    /// Set when `[tools.searxng]` is configured.
+    search: Option<WebSearch>,
     key: String,
     system: String,
     messages: Vec<Message>,
@@ -235,12 +242,14 @@ impl Agent {
             .collect::<Result<Vec<Message>, _>>()
             .context("stored conversation is unreadable; send /new to start over")?;
         let system = system_prompt(&db, memory_id, key).await?;
+        let search = config.searxng.clone().map(WebSearch::new).transpose()?;
         Ok(Self {
             model: Model::new(&config, &format!("mitten-{}", conversation.id))?,
             config,
             db,
             conversation_id: conversation.id,
             memory_id,
+            search,
             key: key.to_owned(),
             system,
             messages,
@@ -265,6 +274,17 @@ impl Agent {
             "saved; memory uses {used}/{} characters. It loads into the next conversation.",
             memory::CHAR_LIMIT
         ))
+    }
+
+    /// Runs one search and tells the user what was searched.
+    async fn web_search(&self, args: &Value, io: &mut impl Io) -> Result<String> {
+        let Some(search) = &self.search else {
+            return Ok("error: web search is not configured".to_owned());
+        };
+        if let Some(query) = args["query"].as_str() {
+            io.note(&format!("searching: {query}")).await?;
+        }
+        Ok(search.run(args).await)
     }
 
     /// Whether this conversation picked up stored history.
@@ -350,6 +370,9 @@ impl Agent {
                 let output = match call.function.name.as_str() {
                     "bash" => run_bash(call, io, self.config.bash_timeout).await?,
                     "memory" => self.remember(&call.function.arguments, io).await?,
+                    "web_search" if self.search.is_some() => {
+                        self.web_search(&call.function.arguments, io).await?
+                    }
                     other => format!("error: unknown tool `{other}`"),
                 };
                 results.push(UserContent::tool_result_for(
