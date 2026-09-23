@@ -560,16 +560,20 @@ struct DiscordAnswers {
     allowed_users: Vec<u64>,
 }
 
-fn parse_user_ids(text: &str) -> std::result::Result<Vec<u64>, String> {
-    let ids = text
-        .split(',')
+/// Comma-separated Discord IDs; `what` names them in errors ("user", "channel").
+fn parse_ids(text: &str, what: &str) -> std::result::Result<Vec<u64>, String> {
+    text.split(',')
         .map(str::trim)
         .filter(|part| !part.is_empty())
         .map(|part| {
             part.parse::<u64>()
-                .map_err(|_| format!("`{part}` is not a Discord user ID (digits only)"))
+                .map_err(|_| format!("`{part}` is not a Discord {what} ID (digits only)"))
         })
-        .collect::<std::result::Result<Vec<_>, _>>()?;
+        .collect()
+}
+
+fn parse_user_ids(text: &str) -> std::result::Result<Vec<u64>, String> {
+    let ids = parse_ids(text, "user")?;
     if ids.is_empty() {
         return Err("enter at least one user ID".to_owned());
     }

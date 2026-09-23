@@ -5,7 +5,7 @@ edition = "2024"
 
 [dependencies]
 anyhow = "1.0.104"
-ratatui = "0.30.2"
+ratatui = { version = "0.30.2", features = ["unstable-rendered-line-info"] }
 reqwest = { version = "0.13.5", default-features = false, features = ["json", "rustls"] }
 rig-core = "0.42.0"
 rusqlite = { version = "0.40.2", features = ["bundled"] }
@@ -16,3 +16,4 @@ tokio = { version = "1.53.1", features = ["full"] }
 toml = "1.1.6"
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+unicode-width = "0.2.2"

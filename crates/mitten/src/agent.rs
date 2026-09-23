@@ -16,6 +16,7 @@ use tokio::process::Command;
 
 use crate::config::{Api, Config};
 use crate::db::Db;
+use crate::memory;
 
 // ponytail: hard cap on tool output fed back to the model; summarize or page if it bites.
 const MAX_OUTPUT_CHARS: usize = 30_000;
@@ -26,6 +27,14 @@ pub trait Io {
     async fn say(&mut self, text: &str) -> Result<()>;
     /// Asks the user to approve `command`; anything but an explicit yes is a no.
     async fn confirm(&mut self, command: &str) -> Result<bool>;
+    /// Tells the user about something the agent did on its own, like saving a memory.
+    async fn note(&mut self, text: &str) -> Result<()> {
+        self.say(text).await
+    }
+    /// Reports what an approved command printed and whether it succeeded.
+    async fn ran(&mut self, _output: &str, _ok: bool) -> Result<()> {
+        Ok(())
+    }
 }
 
 type AnthropicModel = <anthropic::Client as CompletionClient>::CompletionModel;
@@ -96,6 +105,78 @@ impl std::fmt::Debug for Model {
     }
 }
 
+const IDENTITY: &str = "\
+You are Mitten, a personal agent running on the user's machine. \
+Be direct: match reply length to the ask. Finished work gets a short report of what changed, \
+what's verified, and what's left, never a replay of the process. No filler, no restating the request. \
+When unsure, say so plainly.
+
+# Tools
+Use the bash tool to act; don't describe what you would do. If you say you'll do something, \
+make the call in the same response. Keep going until the task is done and verified.
+Never answer from memory what a command can tell you: time and date, arithmetic, hashes, file contents, \
+system state (OS, disk, ports, processes), git state.
+The user approves every command. If one is denied, don't retry it or a variant; ask what they want instead.
+Prefer non-interactive flags (-y, --no-pager). Each command runs in a fresh shell with a timeout, \
+so cd and exported variables do not persist.
+If something fails and blocks you, say so and try another route. Never fabricate output.
+When the obvious interpretation is clear, act; ask only when the ambiguity changes what you would run.";
+
+/// Stable text first, per-session details last, so the provider can cache the prefix.
+/// Memory is read once here, so edits show up from the next conversation (or `/new`) on.
+async fn system_prompt(db: &Db, conversation_id: i64, key: &str) -> Result<String> {
+    let cwd = std::env::current_dir().context("failed to read current directory")?;
+    let memories = db
+        .memories(conversation_id)
+        .await
+        .context("failed to load memory")?;
+    Ok(format!(
+        "{IDENTITY}\n\n{guidance}\n\n{hint}\n\n{saved}\n\nOS: {os}. Working directory: {cwd}.",
+        guidance = memory::GUIDANCE,
+        hint = platform_hint(key),
+        saved = memory::snapshot(&memories),
+        os = os_name(),
+        cwd = cwd.display(),
+    ))
+}
+
+/// Formatting guidance for where the conversation lives, keyed like `Agent::new`.
+fn platform_hint(key: &str) -> &'static str {
+    if key.starts_with("discord:") {
+        "You are chatting over Discord. Markdown renders; tables do not, use bullets. Keep replies short."
+    } else {
+        "You are in a plain terminal. Markdown does not render; write plain text."
+    }
+}
+
+/// End of the last complete tool round in the turn starting at `turn_start`, or `turn_start` if none.
+/// Every user message after the turn's prompt carries tool results, and each closes a round.
+fn completed_rounds_end(messages: &[Message], turn_start: usize) -> usize {
+    messages
+        .iter()
+        .enumerate()
+        .skip(turn_start + 1)
+        .rev()
+        .find(|(_, message)| matches!(message, Message::User { .. }))
+        .map_or(turn_start, |(index, _)| index + 1)
+}
+
+/// The distro name on Linux (e.g. `Ubuntu 24.04 LTS`) so the model picks the right package
+/// manager; the bare OS name elsewhere.
+fn os_name() -> String {
+    std::fs::read_to_string("/etc/os-release")
+        .ok()
+        .and_then(|text| pretty_name(&text))
+        .unwrap_or_else(|| std::env::consts::OS.to_owned())
+}
+
+fn pretty_name(os_release: &str) -> Option<String> {
+    os_release.lines().find_map(|line| {
+        let value = line.strip_prefix("PRETTY_NAME=")?.trim_matches(['"', '\'']);
+        (!value.is_empty()).then(|| value.to_owned())
+    })
+}
+
 fn bash_tool() -> ToolDefinition {
     ToolDefinition {
         name: "bash".to_owned(),
@@ -116,7 +197,7 @@ fn request(config: &Config, system: &str, messages: &[Message]) -> CompletionReq
             .chain(messages.iter().cloned())
             .collect(),
         documents: Vec::new(),
-        tools: vec![bash_tool()],
+        tools: vec![bash_tool(), memory::tool()],
         temperature: None,
         max_tokens: Some(u64::from(config.max_tokens)),
         tool_choice: None,
@@ -133,6 +214,7 @@ pub struct Agent {
     config: Config,
     db: Db,
     conversation_id: i64,
+    key: String,
     system: String,
     messages: Vec<Message>,
 }
@@ -148,19 +230,13 @@ impl Agent {
             .map(|row| serde_json::from_value(row.content))
             .collect::<Result<Vec<Message>, _>>()
             .context("stored conversation is unreadable; send /new to start over")?;
-        let cwd = std::env::current_dir().context("failed to read current directory")?;
-        let system = format!(
-            "You are Mitten, a personal agent running on the user's machine ({os}). \
-             Use the bash tool to inspect and change things; the user approves each command. \
-             Working directory: {cwd}.",
-            os = std::env::consts::OS,
-            cwd = cwd.display(),
-        );
+        let system = system_prompt(&db, conversation.id, key).await?;
         Ok(Self {
             model: Model::new(&config, &format!("mitten-{}", conversation.id))?,
             config,
             db,
             conversation_id: conversation.id,
+            key: key.to_owned(),
             system,
             messages,
         })
@@ -170,13 +246,41 @@ impl Agent {
         format!("opencode-go / {}", self.config.model)
     }
 
+    /// Validates and applies one memory tool call; problems go back to the model as text.
+    async fn remember(&self, args: &Value, io: &mut impl Io) -> Result<String> {
+        let entries = self.db.memories(self.conversation_id).await?;
+        let (edit, used) = match memory::plan(&entries, args) {
+            Ok(planned) => planned,
+            Err(problem) => return Ok(format!("error: {problem}")),
+        };
+        let note = memory::describe(&edit, &entries);
+        self.db.save_memory(self.conversation_id, edit).await?;
+        io.note(&note).await?;
+        Ok(format!(
+            "saved; memory uses {used}/{} characters. It loads into the next conversation.",
+            memory::CHAR_LIMIT
+        ))
+    }
+
+    /// Whether this conversation picked up stored history.
+    pub fn is_resumed(&self) -> bool {
+        !self.messages.is_empty()
+    }
+
     /// Runs one user turn to completion, looping while the model calls tools, then saves it.
-    /// On failure the turn is rolled back so the history stays valid.
+    /// On failure the turn is cut back to its last complete tool round so the history stays valid;
+    /// rounds whose commands already ran are kept, so the model knows what changed.
     pub async fn run_turn(&mut self, prompt: &str, io: &mut impl Io) -> Result<()> {
         let turn_start = self.messages.len();
-        if let Err(err) = self.drive(prompt, io).await {
-            self.messages.truncate(turn_start);
-            return Err(err);
+        let result = self.drive(prompt, io).await;
+        if let Err(err) = &result {
+            let kept = completed_rounds_end(&self.messages, turn_start);
+            self.messages.truncate(kept);
+            if kept == turn_start {
+                return result;
+            }
+            self.messages
+                .push(Message::assistant(format!("[turn aborted: {err:#}]")));
         }
         let turn = self.messages[turn_start..]
             .iter()
@@ -185,13 +289,16 @@ impl Agent {
         self.db
             .append(self.conversation_id, turn)
             .await
-            .context("failed to save the conversation")
+            .context("failed to save the conversation")?;
+        result
     }
 
     /// Forgets the conversation, in memory and on disk.
     pub async fn reset(&mut self) -> Result<()> {
         self.db.clear(self.conversation_id).await?;
         self.messages.clear();
+        // A fresh conversation picks up memory saved since the last one started.
+        self.system = system_prompt(&self.db, self.conversation_id, &self.key).await?;
         Ok(())
     }
 
@@ -235,7 +342,11 @@ impl Agent {
 
             let mut results = Vec::new();
             for call in &calls {
-                let output = run_tool(call, io, self.config.bash_timeout).await?;
+                let output = match call.function.name.as_str() {
+                    "bash" => run_bash(call, io, self.config.bash_timeout).await?,
+                    "memory" => self.remember(&call.function.arguments, io).await?,
+                    other => format!("error: unknown tool `{other}`"),
+                };
                 results.push(UserContent::tool_result_for(
                     call.id.clone(),
                     call.provider.clone(),
@@ -266,11 +377,8 @@ pub async fn ping(config: &Config) -> Result<String> {
         .collect())
 }
 
-/// Runs one tool call after asking the user; failures are reported to the model as text.
-async fn run_tool(call: &ToolCall, io: &mut impl Io, bash_timeout: Duration) -> Result<String> {
-    if call.function.name != "bash" {
-        return Ok(format!("error: unknown tool `{}`", call.function.name));
-    }
+/// Runs one bash call after asking the user; failures are reported to the model as text.
+async fn run_bash(call: &ToolCall, io: &mut impl Io, bash_timeout: Duration) -> Result<String> {
     // ponytail: each command runs in a fresh shell; keep a persistent shell if state across calls matters.
     let Some(command) = call.function.arguments["command"].as_str() else {
         return Ok("error: missing `command` in bash tool input".to_owned());
@@ -279,6 +387,7 @@ async fn run_tool(call: &ToolCall, io: &mut impl Io, bash_timeout: Duration) -> 
         return Ok("error: the user denied this command".to_owned());
     }
     let (output, is_error) = execute(command, bash_timeout).await;
+    io.ran(&output, !is_error).await?;
     Ok(if is_error {
         format!("error:\n{output}")
     } else {
@@ -325,6 +434,25 @@ mod tests {
         let cut = truncate(long);
         assert!(cut.ends_with("[output truncated]"));
         assert_eq!(cut.chars().filter(|c| *c == 'é').count(), MAX_OUTPUT_CHARS);
+    }
+
+    #[test]
+    fn pretty_name_reads_os_release() {
+        let text = "NAME=\"Ubuntu\"\nPRETTY_NAME=\"Ubuntu 24.04 LTS\"\nID=ubuntu\n";
+        assert_eq!(pretty_name(text).as_deref(), Some("Ubuntu 24.04 LTS"));
+        assert_eq!(pretty_name("ID=alpine\n"), None);
+    }
+
+    #[test]
+    fn completed_rounds_end_keeps_only_finished_tool_rounds() {
+        let prior = [Message::user("old"), Message::assistant("old reply")];
+        let mut messages = prior.to_vec();
+        messages.push(Message::user("prompt"));
+        assert_eq!(completed_rounds_end(&messages, 2), 2);
+        messages.push(Message::assistant("calling bash"));
+        messages.push(Message::user("tool results"));
+        messages.push(Message::assistant("calling bash again"));
+        assert_eq!(completed_rounds_end(&messages, 2), 5);
     }
 
     #[tokio::test]

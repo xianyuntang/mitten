@@ -31,3 +31,5 @@ level = "warn"
 # token = "your-bot-token"
 # # Only these Discord user IDs can talk to the bot (it can run commands on this machine).
 # allowed_users = [123456789012345678]
+# # The bot answers these users in DMs and in every server channel it can read, no @mention needed.
+# # Enable the MESSAGE CONTENT intent for the bot in the Developer Portal, or it cannot connect.

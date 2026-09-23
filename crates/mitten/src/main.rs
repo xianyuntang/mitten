@@ -1,7 +1,9 @@
 mod agent;
+mod chat;
 mod config;
 mod db;
 mod discord;
+mod memory;
 mod onboarding;
 mod service;
 
@@ -9,16 +11,16 @@ use std::io::IsTerminal;
 use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines, Stdin};
 use tracing_subscriber::EnvFilter;
+use tracing_subscriber::fmt::writer::BoxMakeWriter;
 
 const USAGE: &str = "usage: mitten [chat|serve|configure|install|uninstall] [--config PATH]
 
   chat       talk in this terminal (default)
   configure  interactive setup: API key, model, Discord
   serve      run the Discord bot from [discord]
-  install    run `mitten serve` at login and keep it alive (macOS launchd)
-  uninstall  remove the launchd service";
+  install    run `mitten serve` in the background and keep it alive (launchd or systemd)
+  uninstall  remove the background service";
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -68,11 +70,28 @@ async fn main() -> Result<()> {
         }
         return service::install(&config_path);
     }
+    // The chat screen owns the terminal, so its logs go to a file next to the database.
+    let writer = if command.as_deref() == Some("serve") {
+        BoxMakeWriter::new(std::io::stderr)
+    } else {
+        let path = config.database_path.with_extension("log");
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir)
+                .with_context(|| format!("failed to create {}", dir.display()))?;
+        }
+        let file = std::fs::File::options()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .with_context(|| format!("failed to open log file {}", path.display()))?;
+        BoxMakeWriter::new(std::sync::Mutex::new(file))
+    };
     tracing_subscriber::fmt()
         .with_env_filter(
             EnvFilter::try_new(&config.log_level).context("invalid log.level in config")?,
         )
-        .with_writer(std::io::stderr)
+        .with_writer(writer)
+        .with_ansi(command.as_deref() == Some("serve") && std::io::stderr().is_terminal())
         .init();
 
     if command.as_deref() == Some("serve") {
@@ -82,57 +101,10 @@ async fn main() -> Result<()> {
 }
 
 async fn chat(config: config::Config) -> Result<()> {
+    if !std::io::stdout().is_terminal() {
+        bail!("mitten chat needs an interactive terminal");
+    }
     let db = db::Db::open(&config.database_path)?;
-    let mut agent = agent::Agent::new(config, db, "terminal").await?;
-    println!("mitten ({})", agent.describe());
-    let mut terminal = Terminal {
-        input: BufReader::new(tokio::io::stdin()).lines(),
-    };
-    let mut stdout = tokio::io::stdout();
-
-    loop {
-        stdout.write_all(b"\n> ").await?;
-        stdout.flush().await?;
-        let Some(line) = terminal.input.next_line().await? else {
-            break;
-        };
-        let prompt = line.trim();
-        if prompt.is_empty() {
-            continue;
-        }
-        if matches!(prompt, "/exit" | "/quit") {
-            break;
-        }
-        if prompt == "/new" {
-            agent.reset().await?;
-            println!("started a new conversation");
-            continue;
-        }
-        if let Err(err) = agent.run_turn(prompt, &mut terminal).await {
-            eprintln!("error: {err:#}");
-        }
-    }
-    Ok(())
-}
-
-struct Terminal {
-    input: Lines<BufReader<Stdin>>,
-}
-
-impl agent::Io for Terminal {
-    async fn say(&mut self, text: &str) -> Result<()> {
-        println!("{text}");
-        Ok(())
-    }
-
-    async fn confirm(&mut self, command: &str) -> Result<bool> {
-        println!("\n$ {command}\nrun? [y/N] ");
-        let answer = self
-            .input
-            .next_line()
-            .await
-            .context("failed to read confirmation")?
-            .unwrap_or_default();
-        Ok(answer.trim().eq_ignore_ascii_case("y"))
-    }
+    let agent = agent::Agent::new(config, db, "terminal").await?;
+    chat::run(agent).await
 }

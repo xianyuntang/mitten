@@ -138,7 +138,7 @@ impl Default for LogSection {
     }
 }
 
-/// `[discord]`: lets `mitten serve` take DMs from a Discord bot.
+/// `[discord]`: lets `mitten serve` chat through a Discord bot, by DM and in any server channel.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DiscordSection {

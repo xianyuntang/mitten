@@ -1,4 +1,5 @@
-//! Installs `mitten serve` as a macOS launchd agent that starts at login and restarts on exit.
+//! Installs `mitten serve` as a background service that starts on its own and restarts on exit:
+//! a launchd agent on macOS, a systemd user unit on Linux.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -6,24 +7,40 @@ use std::process::Command;
 use anyhow::{Context, Result, bail};
 
 const LABEL: &str = "dev.mitten.serve";
+const UNIT: &str = "mitten.service";
 
-fn plist_path() -> Result<PathBuf> {
-    Ok(std::env::home_dir()
-        .context("cannot find home directory")?
-        .join(format!("Library/LaunchAgents/{LABEL}.plist")))
-}
-
-// ponytail: macOS launchd only; add a systemd --user unit when Linux matters.
 pub fn install(config_path: &Path) -> Result<()> {
-    if !cfg!(target_os = "macos") {
-        bail!("`mitten install` only supports macOS (launchd) for now");
-    }
     let exe = std::env::current_exe().context("failed to locate the mitten binary")?;
     let home = std::env::home_dir().context("cannot find home directory")?;
-    let log = home.join("Library/Logs/mitten.log");
-    let plist = plist_path()?;
+    if cfg!(target_os = "macos") {
+        launchd_install(&exe, config_path, &home)
+    } else if cfg!(target_os = "linux") {
+        systemd_install(&exe, config_path, &home)
+    } else {
+        bail!("`mitten install` supports macOS (launchd) and Linux (systemd)")
+    }
+}
 
-    let contents = render_plist(&exe, config_path, &home, &log);
+pub fn uninstall() -> Result<()> {
+    let home = std::env::home_dir().context("cannot find home directory")?;
+    if cfg!(target_os = "macos") {
+        launchd_uninstall(&home)
+    } else if cfg!(target_os = "linux") {
+        systemd_uninstall(&home)
+    } else {
+        bail!("`mitten uninstall` supports macOS (launchd) and Linux (systemd)")
+    }
+}
+
+fn plist_path(home: &Path) -> PathBuf {
+    home.join(format!("Library/LaunchAgents/{LABEL}.plist"))
+}
+
+fn launchd_install(exe: &Path, config_path: &Path, home: &Path) -> Result<()> {
+    let log = home.join("Library/Logs/mitten.log");
+    let plist = plist_path(home);
+
+    let contents = render_plist(exe, config_path, home, &log);
     if let Some(dir) = plist.parent() {
         std::fs::create_dir_all(dir)
             .with_context(|| format!("failed to create {}", dir.display()))?;
@@ -38,8 +55,8 @@ pub fn install(config_path: &Path) -> Result<()> {
     Ok(())
 }
 
-pub fn uninstall() -> Result<()> {
-    let plist = plist_path()?;
+fn launchd_uninstall(home: &Path) -> Result<()> {
+    let plist = plist_path(home);
     if !plist.exists() {
         println!("not installed");
         return Ok(());
@@ -52,14 +69,102 @@ pub fn uninstall() -> Result<()> {
 }
 
 fn launchctl(args: &[&str]) -> Result<()> {
-    let status = Command::new("launchctl")
+    run("launchctl", args)
+}
+
+fn unit_path(home: &Path) -> PathBuf {
+    std::env::var_os("XDG_CONFIG_HOME")
+        .map_or_else(|| home.join(".config"), PathBuf::from)
+        .join("systemd/user")
+        .join(UNIT)
+}
+
+fn systemd_install(exe: &Path, config_path: &Path, home: &Path) -> Result<()> {
+    let unit = unit_path(home);
+    if let Some(dir) = unit.parent() {
+        std::fs::create_dir_all(dir)
+            .with_context(|| format!("failed to create {}", dir.display()))?;
+    }
+    std::fs::write(&unit, render_unit(exe, config_path, home))
+        .with_context(|| format!("failed to write {}", unit.display()))?;
+    systemctl(&["daemon-reload"])?;
+    systemctl(&["enable", UNIT])?;
+    // Restart rather than start so a reinstall picks up the new binary and config.
+    systemctl(&["restart", UNIT])?;
+    // Without lingering, user services stop at logout and do not start at boot.
+    if run("loginctl", &["enable-linger"]).is_err() {
+        println!(
+            "warning: could not enable lingering, so mitten stops when you log out.\n\
+             fix: sudo loginctl enable-linger $USER"
+        );
+    }
+    println!(
+        "installed {}\nlogs: journalctl --user -u mitten -f",
+        unit.display()
+    );
+    Ok(())
+}
+
+fn systemd_uninstall(home: &Path) -> Result<()> {
+    let unit = unit_path(home);
+    if !unit.exists() {
+        println!("not installed");
+        return Ok(());
+    }
+    // Failure just means it wasn't running; lingering stays on since other services may need it.
+    let _ = systemctl(&["disable", "--now", UNIT]);
+    std::fs::remove_file(&unit).with_context(|| format!("failed to remove {}", unit.display()))?;
+    let _ = systemctl(&["daemon-reload"]);
+    println!("removed {}", unit.display());
+    Ok(())
+}
+
+fn systemctl(args: &[&str]) -> Result<()> {
+    run("systemctl", &[&["--user"], args].concat())
+}
+
+fn run(program: &str, args: &[&str]) -> Result<()> {
+    let status = Command::new(program)
         .args(args)
         .status()
-        .context("failed to run launchctl")?;
+        .with_context(|| format!("failed to run {program}"))?;
     if !status.success() {
-        bail!("launchctl {} failed: {status}", args.join(" "));
+        bail!("{program} {} failed: {status}", args.join(" "));
     }
     Ok(())
+}
+
+fn render_unit(exe: &Path, config: &Path, home: &Path) -> String {
+    let home = home.to_string_lossy().replace('%', "%%");
+    format!(
+        r#"[Unit]
+Description=Mitten agent (Discord)
+
+[Service]
+ExecStart={exe} serve --config {config}
+WorkingDirectory=~
+# The user manager's default PATH lacks cargo and ~/.local/bin, which bash tool commands expect.
+Environment="PATH={home}/.cargo/bin:{home}/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+Restart=always
+RestartSec=30
+
+[Install]
+WantedBy=default.target
+"#,
+        exe = systemd_quote(exe),
+        config = systemd_quote(config),
+    )
+}
+
+/// Quotes one ExecStart argument: escapes quotes, backslashes, and systemd's `%` and `$` expansions.
+fn systemd_quote(path: &Path) -> String {
+    let text = path
+        .to_string_lossy()
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('%', "%%")
+        .replace('$', "$$");
+    format!("\"{text}\"")
 }
 
 fn path_str(path: &Path) -> Result<&str> {
@@ -121,6 +226,21 @@ mod tests {
         assert!(plist.contains("<string>serve</string>"));
         assert!(plist.contains("<string>/cfg/a&amp;b.toml</string>"));
         assert!(plist.contains("<key>KeepAlive</key><true/>"));
+    }
+
+    #[test]
+    fn unit_runs_serve_with_quoted_paths() {
+        let unit = render_unit(
+            Path::new("/opt/my apps/mitten"),
+            Path::new("/cfg/100%$x.toml"),
+            Path::new("/home/me"),
+        );
+        assert!(
+            unit.contains(r#"ExecStart="/opt/my apps/mitten" serve --config "/cfg/100%%$$x.toml""#),
+            "{unit}"
+        );
+        assert!(unit.contains("Restart=always"));
+        assert!(unit.contains("/home/me/.cargo/bin:"));
     }
 
     #[cfg(target_os = "macos")]

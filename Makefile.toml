@@ -31,8 +31,8 @@ echo "  cargo make sweep [days]           - Remove build artifacts unused for N 
 echo "  cargo make configure              - Interactive setup: API key, model, Discord"
 echo "  cargo make chat [args]            - Chat in the terminal (cargo run -- chat)"
 echo "  cargo make serve [args]           - Run the Discord bot in the foreground"
-echo "  cargo make service:install        - Install the binary and start it at login (launchd)"
-echo "  cargo make service:uninstall      - Remove the launchd service"
+echo "  cargo make service:install        - Install the binary and run it as a service (launchd/systemd)"
+echo "  cargo make service:uninstall      - Remove the service"
 echo "  cargo make service:logs           - Follow the service log"
 '''
 
@@ -110,9 +110,9 @@ description = "Run the Discord bot in the foreground"
 command = "cargo"
 args = ["run", "--package", "mitten", "--", "serve", "${@}"]
 
-# --- Service (macOS launchd) ---
+# --- Service (launchd on macOS, systemd on Linux) ---
 [tasks."service:install"]
-description = "Install the mitten binary, then run `mitten serve` at login"
+description = "Install the mitten binary, then run `mitten serve` as a background service"
 script = '''
 #!/usr/bin/env bash
 set -euo pipefail
@@ -121,7 +121,7 @@ cargo install --locked --path crates/mitten
 '''
 
 [tasks."service:uninstall"]
-description = "Remove the launchd service"
+description = "Remove the background service"
 script = '''
 #!/usr/bin/env bash
 set -euo pipefail
@@ -132,5 +132,9 @@ set -euo pipefail
 description = "Follow the service log"
 script = '''
 #!/usr/bin/env bash
-tail -f "$HOME/Library/Logs/mitten.log"
+if [ "$(uname)" = Darwin ]; then
+  tail -f "$HOME/Library/Logs/mitten.log"
+else
+  journalctl --user -u mitten -f
+fi
 '''
