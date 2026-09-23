@@ -1,0 +1,136 @@
+# cargo-make configuration for mitten
+# Install: cargo install cargo-make
+# Usage: cargo make <task>
+
+[config]
+min_version = "0.37.0"
+default_to_workspace = false
+
+# --- Default Task ---
+[tasks.default]
+description = "Show available tasks"
+# Drop cargo-make's built-in default flow (fmt + build + test) so this only lists tasks.
+clear = true
+run_task = { name = "list-tasks" }
+
+[tasks.list-tasks]
+description = "List all available tasks"
+script = '''
+#!/usr/bin/env bash
+echo "Available tasks:"
+echo "  cargo make build                  - Build the project"
+echo "  cargo make build-release          - Build in release mode"
+echo "  cargo make test                   - Run tests"
+echo "  cargo make lint                   - Run clippy (deny warnings)"
+echo "  cargo make fmt                    - Format code"
+echo "  cargo make fmt-check              - Check formatting"
+echo "  cargo make check                  - Type check"
+echo "  cargo make ci                     - Full CI pipeline: lint, fmt-check, test"
+echo "  cargo make clean                  - Remove all build artifacts"
+echo "  cargo make sweep [days]           - Remove build artifacts unused for N days (default 7)"
+echo "  cargo make configure              - Interactive setup: API key, model, Discord"
+echo "  cargo make chat [args]            - Chat in the terminal (cargo run -- chat)"
+echo "  cargo make serve [args]           - Run the Discord bot in the foreground"
+echo "  cargo make service:install        - Install the binary and start it at login (launchd)"
+echo "  cargo make service:uninstall      - Remove the launchd service"
+echo "  cargo make service:logs           - Follow the service log"
+'''
+
+# --- Build ---
+[tasks.build]
+description = "Build the project"
+command = "cargo"
+args = ["build"]
+
+[tasks.build-release]
+description = "Build in release mode"
+command = "cargo"
+args = ["build", "--release"]
+
+# --- Test ---
+[tasks.test]
+description = "Run tests"
+command = "cargo"
+args = ["test", "--workspace"]
+
+# --- Lint & Format ---
+[tasks.lint]
+description = "Run clippy with strict settings"
+command = "cargo"
+args = ["clippy", "--workspace", "--all-targets", "--", "-D", "warnings"]
+
+[tasks.fmt]
+description = "Format code with rustfmt"
+command = "cargo"
+args = ["fmt"]
+
+[tasks.fmt-check]
+description = "Check code formatting"
+command = "cargo"
+args = ["fmt", "--check"]
+
+[tasks.check]
+description = "Type check without building"
+command = "cargo"
+args = ["check", "--workspace", "--all-targets"]
+
+# --- CI Pipeline ---
+[tasks.ci]
+description = "Full CI pipeline: lint, format check, and test"
+run_task = { name = ["lint", "fmt-check", "test"] }
+
+# --- Clean ---
+[tasks.clean]
+description = "Remove all build artifacts"
+command = "cargo"
+args = ["clean"]
+
+[tasks.sweep]
+description = "Remove build artifacts unused for N days (default 7)"
+install_crate = "cargo-sweep"
+script = '''
+#!/usr/bin/env bash
+cargo sweep --time "${1:-7}"
+'''
+
+# --- Config ---
+[tasks.configure]
+description = "Interactive setup: API key, model, Discord"
+command = "cargo"
+args = ["run", "--package", "mitten", "--", "configure", "${@}"]
+
+# --- Run ---
+[tasks.chat]
+description = "Chat in the terminal"
+command = "cargo"
+args = ["run", "--package", "mitten", "--", "chat", "${@}"]
+
+[tasks.serve]
+description = "Run the Discord bot in the foreground"
+command = "cargo"
+args = ["run", "--package", "mitten", "--", "serve", "${@}"]
+
+# --- Service (macOS launchd) ---
+[tasks."service:install"]
+description = "Install the mitten binary, then run `mitten serve` at login"
+script = '''
+#!/usr/bin/env bash
+set -euo pipefail
+cargo install --locked --path crates/mitten
+"$HOME/.cargo/bin/mitten" install "$@"
+'''
+
+[tasks."service:uninstall"]
+description = "Remove the launchd service"
+script = '''
+#!/usr/bin/env bash
+set -euo pipefail
+"$HOME/.cargo/bin/mitten" uninstall
+'''
+
+[tasks."service:logs"]
+description = "Follow the service log"
+script = '''
+#!/usr/bin/env bash
+tail -f "$HOME/Library/Logs/mitten.log"
+'''

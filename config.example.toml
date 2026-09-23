@@ -1,0 +1,30 @@
+# Mitten config. Easiest: run `mitten configure`, which writes ~/.config/mitten/config.toml for you.
+# Or copy this file there, or pass a path: `mitten --config path/to/config.toml`.
+
+[model]
+# Optional. OpenCode Go models in Anthropic format: minimax-m3, minimax-m2.7, qwen3.8-max, qwen3.8-flash, ...
+name = "minimax-m3"
+# Optional. Default 16000.
+# max_tokens = 16000
+
+[opencode-go]
+api_key = "your-opencode-api-key"
+# Optional. ".../messages" is appended.
+# base_url = "https://opencode.ai/zen/go/v1"
+
+[tools.bash]
+timeout_secs = 120
+
+[log]
+# tracing filter, e.g. "warn", "info", "mitten=debug".
+level = "warn"
+
+# Optional. Conversation history (SQLite); send /new to start over.
+# [database]
+# path = "/Users/you/.local/share/mitten/mitten.db"
+
+# Optional. Needed for `mitten serve`: chat with Mitten by DM to your Discord bot.
+# [discord]
+# token = "your-bot-token"
+# # Only these Discord user IDs can talk to the bot (it can run commands on this machine).
+# allowed_users = [123456789012345678]

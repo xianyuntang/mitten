@@ -1,0 +1,12 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[profile.dev]
+opt-level = 0
+debug = "line-tables-only" # keep file:line for backtraces only
+split-debuginfo = "packed" # one .dSYM/.dwp instead of per-object debug info
+
+[profile.dev.package."*"]
+opt-level = 2
+debug = false # no debug info for third-party crates
