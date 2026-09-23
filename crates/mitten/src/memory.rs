@@ -1,5 +1,5 @@
 //! Long-term memory: short facts the agent saves itself, kept per conversation (the terminal, or one
-//! Discord channel) and loaded whenever that conversation starts, including after `/new`.
+//! Discord channel shared with its threads) and loaded whenever a conversation starts, even after `/new`.
 
 use serde_json::{Value, json};
 
@@ -14,8 +14,9 @@ pub const CHAR_LIMIT: usize = 2_200;
 /// Stable guidance for the system prompt; the entries themselves come from `snapshot`.
 pub const GUIDANCE: &str = "\
 # Memory
-You have long-term memory for this conversation (this terminal, or this Discord channel); \
-it survives /new and is loaded whenever the conversation starts. Other channels have their own. \
+You have long-term memory for this conversation (this terminal, or this Discord channel and all \
+of its threads); it survives /new and is loaded whenever a conversation starts. Other channels \
+have their own. \
 Save with the memory tool only facts that matter from now on: who you are talking to, their \
 preferences, stable facts about this machine, standing conventions. \
 Skip task progress, things that are easy to rediscover, and anything stale within a week. \

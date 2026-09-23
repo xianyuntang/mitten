@@ -1,5 +1,6 @@
-//! Discord gateway: one agent per channel (DMs and every server channel the bot can read),
-//! fed by an allow-listed set of users who approve commands with buttons.
+//! Discord gateway: one agent per DM or thread. A message in a server text channel opens a new
+//! thread for its conversation; threads share their parent channel's memory. Only allow-listed
+//! users are heard, and they approve commands with buttons.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -7,9 +8,10 @@ use std::time::Duration;
 
 use anyhow::{Context as _, Result, bail};
 use serenity::all::{
-    ButtonStyle, ChannelId, Client, ComponentInteraction, Context, CreateActionRow, CreateButton,
-    CreateInteractionResponse, CreateInteractionResponseMessage, CreateMessage, EditMessage,
-    EventHandler, GatewayIntents, Http, Interaction, Message, MessageId, Ready,
+    AutoArchiveDuration, ButtonStyle, ChannelId, ChannelType, Client, ComponentInteraction,
+    Context, CreateActionRow, CreateButton, CreateInteractionResponse,
+    CreateInteractionResponseMessage, CreateMessage, CreateThread, EditMessage, EventHandler,
+    GatewayIntents, Http, Interaction, Message, MessageId, Ready,
 };
 use serenity::async_trait;
 use tokio::sync::mpsc;
@@ -21,18 +23,27 @@ use crate::db::Db;
 const CONFIRM_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 /// Discord rejects messages over 2000 characters.
 const MAX_MESSAGE_CHARS: usize = 1_900;
+/// Reaction added to each message the bot picks up, swapped for `DONE` or `FAILED` once handled.
+const RECEIVED: char = '👀';
+const DONE: char = '✅';
+const FAILED: char = '❌';
 const RUN: &str = "mitten:run";
 const DENY: &str = "mitten:deny";
+/// Discord caps thread names at 100 characters.
+const MAX_THREAD_NAME_CHARS: usize = 80;
 
 /// What a channel's agent task receives.
 #[derive(Debug)]
 enum Input {
-    Text(String),
-    /// A Run or Deny click on the approval message `message`.
-    Decision {
+    /// A user's message, and where it lives (a thread's first message sits in the parent channel)
+    /// so its reaction can be updated once handled.
+    Text {
+        content: String,
+        origin: ChannelId,
         message: MessageId,
-        run: bool,
     },
+    /// A Run or Deny click on the approval message `message`.
+    Decision { message: MessageId, run: bool },
 }
 
 /// Connects to Discord and serves DMs until the connection fails.
@@ -69,7 +80,8 @@ struct Handler {
 
 impl Handler {
     /// Hands `input` to the channel's agent task, starting one for text if none is running.
-    fn deliver(&self, http: &Arc<Http>, channel: ChannelId, input: Input) {
+    /// `memory` is the channel whose memory a newly started agent uses.
+    fn deliver(&self, http: &Arc<Http>, channel: ChannelId, memory: ChannelId, input: Input) {
         let Ok(mut channels) = self.channels.lock() else {
             tracing::error!("channel map lock poisoned");
             return;
@@ -84,6 +96,7 @@ impl Handler {
                 self.db.clone(),
                 Arc::clone(http),
                 channel,
+                memory,
                 rx,
             ));
             tx
@@ -123,6 +136,7 @@ impl Handler {
         self.deliver(
             &ctx.http,
             click.channel_id,
+            click.channel_id,
             Input::Decision {
                 message: click.message.id,
                 run,
@@ -139,7 +153,23 @@ impl EventHandler for Handler {
         if msg.author.bot || !self.allowed_users.contains(&msg.author.id.get()) {
             return;
         }
-        self.deliver(&ctx.http, msg.channel_id, Input::Text(msg.content));
+        // Acknowledge right away so the user knows the bot has it before the model answers.
+        if let Err(err) = msg.react(&ctx.http, RECEIVED).await {
+            tracing::warn!("failed to react to message: {err:#}");
+        }
+        let (channel, memory) = match route(&ctx, &msg).await {
+            Ok(route) => route,
+            Err(err) => {
+                tracing::warn!("failed to open a thread, answering in place: {err:#}");
+                (msg.channel_id, msg.channel_id)
+            }
+        };
+        let input = Input::Text {
+            content: msg.content,
+            origin: msg.channel_id,
+            message: msg.id,
+        };
+        self.deliver(&ctx.http, channel, memory, input);
     }
 
     async fn ready(&self, _ctx: Context, ready: Ready) {
@@ -156,15 +186,62 @@ impl EventHandler for Handler {
     }
 }
 
+/// Where `msg` is answered and whose memory applies: a new thread off a message in a server text
+/// channel, the parent channel's memory inside a thread, and the channel itself for DMs.
+async fn route(ctx: &Context, msg: &Message) -> Result<(ChannelId, ChannelId)> {
+    let here = msg.channel_id;
+    if msg.guild_id.is_none() {
+        return Ok((here, here));
+    }
+    // ponytail: one channel lookup per server message; enable serenity's cache if volume grows.
+    let Some(channel) = here.to_channel(&ctx.http).await?.guild() else {
+        return Ok((here, here));
+    };
+    Ok(match channel.kind {
+        ChannelType::Text | ChannelType::News => {
+            let thread = CreateThread::new(thread_name(&msg.content))
+                .auto_archive_duration(AutoArchiveDuration::OneDay);
+            let thread = here
+                .create_thread_from_message(&ctx.http, msg.id, thread)
+                .await?;
+            (thread.id, here)
+        }
+        ChannelType::PublicThread | ChannelType::PrivateThread | ChannelType::NewsThread => {
+            (here, channel.parent_id.unwrap_or(here))
+        }
+        _ => (here, here),
+    })
+}
+
+/// The message's first line, shortened to fit a thread name.
+fn thread_name(content: &str) -> String {
+    let line = content
+        .lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty())
+        .unwrap_or("");
+    let mut name: String = line.chars().take(MAX_THREAD_NAME_CHARS).collect();
+    if name.len() < line.len() {
+        name.push('…');
+    }
+    if name.is_empty() {
+        name.push_str("mitten");
+    }
+    name
+}
+
 #[tracing::instrument(skip_all, fields(channel = %channel))]
 async fn run_channel(
     config: Config,
     db: Db,
     http: Arc<Http>,
     channel: ChannelId,
+    memory: ChannelId,
     inbox: mpsc::UnboundedReceiver<Input>,
 ) {
-    let mut agent = match Agent::new(config, db, &format!("discord:{channel}")).await {
+    let key = format!("discord:{channel}");
+    let memory_key = format!("discord:{memory}");
+    let mut agent = match Agent::new(config, db, &key, &memory_key).await {
         Ok(agent) => agent,
         Err(err) => {
             tracing::error!("failed to start agent: {err:#}");
@@ -178,30 +255,40 @@ async fn run_channel(
         approval: None,
     };
     while let Some(input) = io.inbox.recv().await {
-        let Input::Text(prompt) = input else {
+        let Input::Text {
+            content,
+            origin,
+            message,
+        } = input
+        else {
             continue; // A click on an approval that already timed out.
         };
-        let prompt = prompt.trim();
+        let prompt = content.trim();
         if prompt.is_empty() {
+            io.finish(origin, message, true).await;
             continue;
         }
         if prompt == "/new" {
-            let reply = match agent.reset().await {
-                Ok(()) => "Started a new conversation.".to_owned(),
-                Err(err) => format!("error: {err:#}"),
+            let (reply, ok) = match agent.reset().await {
+                Ok(()) => ("Started a new conversation.".to_owned(), true),
+                Err(err) => (format!("error: {err:#}"), false),
             };
             if let Err(err) = io.say(&reply).await {
                 tracing::error!("failed to reply: {err:#}");
             }
+            io.finish(origin, message, ok).await;
             continue;
         }
-        let _typing = io.channel.start_typing(&io.http);
-        if let Err(err) = agent.run_turn(prompt, &mut io).await {
+        let typing = io.channel.start_typing(&io.http);
+        let result = agent.run_turn(prompt, &mut io).await;
+        drop(typing);
+        if let Err(err) = &result {
             tracing::warn!("turn failed: {err:#}");
             if let Err(err) = io.say(&format!("error: {err:#}")).await {
                 tracing::error!("failed to report error: {err:#}");
             }
         }
+        io.finish(origin, message, result.is_ok()).await;
     }
 }
 
@@ -214,6 +301,20 @@ struct DiscordIo {
 }
 
 impl DiscordIo {
+    /// Swaps the bot's 👀 on `message` in `origin` for ✅ or ❌; failures are only logged.
+    async fn finish(&self, origin: ChannelId, message: MessageId, ok: bool) {
+        let swap = async {
+            origin
+                .delete_reaction(&self.http, message, None, RECEIVED)
+                .await?;
+            let done = if ok { DONE } else { FAILED };
+            origin.create_reaction(&self.http, message, done).await
+        };
+        if let Err(err) = swap.await {
+            tracing::warn!("failed to update reaction: {err:#}");
+        }
+    }
+
     /// Replaces the approval message's text and removes its buttons; failures are only logged.
     async fn settle(&self, message: MessageId, content: String) {
         let edit = EditMessage::new().content(content).components(Vec::new());
@@ -268,8 +369,13 @@ impl Io for DiscordIo {
                 Ok(Some(Input::Decision { message: id, run })) if id == message => break run,
                 Ok(Some(Input::Decision { .. })) => {}
                 // Typing an answer still works; anything but `y` is a no.
-                Ok(Some(Input::Text(reply))) => {
-                    let run = reply.trim().eq_ignore_ascii_case("y");
+                Ok(Some(Input::Text {
+                    content,
+                    origin,
+                    message: reply,
+                })) => {
+                    let run = content.trim().eq_ignore_ascii_case("y");
+                    self.finish(origin, reply, true).await;
                     let status = if run {
                         "▶️ running…"
                     } else {
@@ -342,6 +448,15 @@ mod tests {
         assert!(parts.iter().all(|p| p.chars().count() <= MAX_MESSAGE_CHARS));
         assert_eq!(parts.concat(), text);
         assert!(chunks("", MAX_MESSAGE_CHARS).is_empty());
+    }
+
+    #[test]
+    fn thread_name_uses_first_line_within_limit() {
+        assert_eq!(thread_name("\n  check disk  \nmore"), "check disk");
+        assert_eq!(thread_name("   "), "mitten");
+        let long = thread_name(&"磁".repeat(200));
+        assert_eq!(long.chars().count(), MAX_THREAD_NAME_CHARS + 1);
+        assert!(long.ends_with('…'));
     }
 
     #[test]

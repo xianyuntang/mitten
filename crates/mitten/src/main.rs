@@ -105,6 +105,6 @@ async fn chat(config: config::Config) -> Result<()> {
         bail!("mitten chat needs an interactive terminal");
     }
     let db = db::Db::open(&config.database_path)?;
-    let agent = agent::Agent::new(config, db, "terminal").await?;
+    let agent = agent::Agent::new(config, db, "terminal", "terminal").await?;
     chat::run(agent).await
 }

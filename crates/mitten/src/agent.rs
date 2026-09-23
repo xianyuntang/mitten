@@ -124,10 +124,10 @@ When the obvious interpretation is clear, act; ask only when the ambiguity chang
 
 /// Stable text first, per-session details last, so the provider can cache the prefix.
 /// Memory is read once here, so edits show up from the next conversation (or `/new`) on.
-async fn system_prompt(db: &Db, conversation_id: i64, key: &str) -> Result<String> {
+async fn system_prompt(db: &Db, memory_id: i64, key: &str) -> Result<String> {
     let cwd = std::env::current_dir().context("failed to read current directory")?;
     let memories = db
-        .memories(conversation_id)
+        .memories(memory_id)
         .await
         .context("failed to load memory")?;
     Ok(format!(
@@ -214,15 +214,19 @@ pub struct Agent {
     config: Config,
     db: Db,
     conversation_id: i64,
+    /// Conversation whose memory this one reads and writes; a Discord thread uses its parent channel's.
+    memory_id: i64,
     key: String,
     system: String,
     messages: Vec<Message>,
 }
 
 impl Agent {
-    /// Resumes the stored conversation named `key` (e.g. `terminal`, `discord:<channel>`).
-    pub async fn new(config: Config, db: Db, key: &str) -> Result<Self> {
+    /// Resumes the stored conversation named `key` (e.g. `terminal`, `discord:<channel>`),
+    /// with the memory of the conversation named `memory_key` (usually `key` itself).
+    pub async fn new(config: Config, db: Db, key: &str, memory_key: &str) -> Result<Self> {
         let conversation = db.conversation(key).await?;
+        let memory_id = db.conversation(memory_key).await?.id;
         let messages = db
             .messages(conversation.id)
             .await?
@@ -230,12 +234,13 @@ impl Agent {
             .map(|row| serde_json::from_value(row.content))
             .collect::<Result<Vec<Message>, _>>()
             .context("stored conversation is unreadable; send /new to start over")?;
-        let system = system_prompt(&db, conversation.id, key).await?;
+        let system = system_prompt(&db, memory_id, key).await?;
         Ok(Self {
             model: Model::new(&config, &format!("mitten-{}", conversation.id))?,
             config,
             db,
             conversation_id: conversation.id,
+            memory_id,
             key: key.to_owned(),
             system,
             messages,
@@ -248,13 +253,13 @@ impl Agent {
 
     /// Validates and applies one memory tool call; problems go back to the model as text.
     async fn remember(&self, args: &Value, io: &mut impl Io) -> Result<String> {
-        let entries = self.db.memories(self.conversation_id).await?;
+        let entries = self.db.memories(self.memory_id).await?;
         let (edit, used) = match memory::plan(&entries, args) {
             Ok(planned) => planned,
             Err(problem) => return Ok(format!("error: {problem}")),
         };
         let note = memory::describe(&edit, &entries);
-        self.db.save_memory(self.conversation_id, edit).await?;
+        self.db.save_memory(self.memory_id, edit).await?;
         io.note(&note).await?;
         Ok(format!(
             "saved; memory uses {used}/{} characters. It loads into the next conversation.",
@@ -298,7 +303,7 @@ impl Agent {
         self.db.clear(self.conversation_id).await?;
         self.messages.clear();
         // A fresh conversation picks up memory saved since the last one started.
-        self.system = system_prompt(&self.db, self.conversation_id, &self.key).await?;
+        self.system = system_prompt(&self.db, self.memory_id, &self.key).await?;
         Ok(())
     }
 
