@@ -7,11 +7,13 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::{Context as _, Result, bail};
+use base64::Engine as _;
+use rig_core::message::{DocumentSourceKind, Image, ImageMediaType, MimeType as _};
 use serenity::all::{
-    AutoArchiveDuration, ButtonStyle, ChannelId, ChannelType, Client, ComponentInteraction,
-    Context, CreateActionRow, CreateAllowedMentions, CreateButton, CreateInteractionResponse,
-    CreateInteractionResponseMessage, CreateMessage, CreateThread, EditMessage, EventHandler,
-    GatewayIntents, Http, Interaction, Message, MessageId, Ready,
+    Attachment, AutoArchiveDuration, ButtonStyle, ChannelId, ChannelType, Client,
+    ComponentInteraction, Context, CreateActionRow, CreateAllowedMentions, CreateButton,
+    CreateInteractionResponse, CreateInteractionResponseMessage, CreateMessage, CreateThread,
+    EditMessage, EventHandler, GatewayIntents, Http, Interaction, Message, MessageId, Ready,
 };
 use serenity::async_trait;
 use tokio::sync::mpsc;
@@ -33,6 +35,10 @@ const DENY: &str = "mitten:deny";
 const MAX_STATUS_CHARS: usize = 200;
 /// Discord caps thread names at 100 characters.
 const MAX_THREAD_NAME_CHARS: usize = 80;
+/// Anthropic rejects images over 5 MB; larger attachments are left out.
+const MAX_IMAGE_BYTES: u32 = 5 * 1024 * 1024;
+/// Largest text attachment read, like the `message.txt` Discord makes from a long paste.
+const MAX_TEXT_BYTES: u32 = 200 * 1024;
 
 /// What a channel's agent task receives.
 #[derive(Debug)]
@@ -41,6 +47,8 @@ enum Input {
     /// so its reaction can be updated once handled.
     Text {
         content: String,
+        /// Image and text attachments, downloaded when the turn starts.
+        attachments: Vec<Attachment>,
         origin: ChannelId,
         message: MessageId,
     },
@@ -166,8 +174,14 @@ impl EventHandler for Handler {
                 (msg.channel_id, msg.channel_id)
             }
         };
+        let attachments = msg
+            .attachments
+            .into_iter()
+            .filter(|a| image_type(a).is_some() || is_text(a))
+            .collect();
         let input = Input::Text {
             content: msg.content,
+            attachments,
             origin: msg.channel_id,
             message: msg.id,
         };
@@ -252,6 +266,7 @@ async fn run_channel(
     };
     let mut io = DiscordIo {
         http,
+        web: reqwest::Client::new(),
         channel,
         inbox,
         approval: None,
@@ -260,6 +275,7 @@ async fn run_channel(
     while let Some(input) = io.inbox.recv().await {
         let Input::Text {
             content,
+            attachments,
             origin,
             message,
         } = input
@@ -267,7 +283,7 @@ async fn run_channel(
             continue; // A click on an approval that already timed out.
         };
         let prompt = content.trim();
-        if prompt.is_empty() {
+        if prompt.is_empty() && attachments.is_empty() {
             io.finish(origin, message, true).await;
             continue;
         }
@@ -284,7 +300,13 @@ async fn run_channel(
         }
         io.status = None;
         let typing = io.channel.start_typing(&io.http);
-        let result = agent.run_turn(prompt, &mut io).await;
+        let result = match download(&io.web, &attachments).await {
+            Ok((text, images)) => {
+                let prompt = format!("{prompt}{text}");
+                agent.run_turn(prompt.trim(), images, &mut io).await
+            }
+            Err(err) => Err(err),
+        };
         drop(typing);
         if let Err(err) = &result {
             tracing::warn!("turn failed: {err:#}");
@@ -298,6 +320,8 @@ async fn run_channel(
 
 struct DiscordIo {
     http: Arc<Http>,
+    /// Downloads image attachments.
+    web: reqwest::Client,
     channel: ChannelId,
     inbox: mpsc::UnboundedReceiver<Input>,
     /// The last approved command's message and its command block, where the output goes.
@@ -410,6 +434,7 @@ impl Io for DiscordIo {
                     content,
                     origin,
                     message: reply,
+                    ..
                 })) => {
                     let run = content.trim().eq_ignore_ascii_case("y");
                     self.finish(origin, reply, true).await;
@@ -444,6 +469,76 @@ impl Io for DiscordIo {
         self.settle(message, content).await;
         Ok(())
     }
+}
+
+/// The attachment's image format, if it is an image the model can read.
+fn image_type(attachment: &Attachment) -> Option<ImageMediaType> {
+    let mime = attachment
+        .content_type
+        .as_deref()?
+        .split(';')
+        .next()?
+        .trim();
+    ImageMediaType::from_mime_type(mime)
+}
+
+/// Whether the attachment is text to read into the prompt.
+fn is_text(attachment: &Attachment) -> bool {
+    attachment
+        .content_type
+        .as_deref()
+        .is_some_and(|mime| mime.starts_with("text/") || mime.starts_with("application/json"))
+}
+
+/// Downloads `attachments` for the model: text files as prompt text to append, images as images.
+/// Files over `MAX_TEXT_BYTES` or `MAX_IMAGE_BYTES` are left out.
+async fn download(
+    web: &reqwest::Client,
+    attachments: &[Attachment],
+) -> Result<(String, Vec<Image>)> {
+    let mut text = String::new();
+    let mut images = Vec::new();
+    for attachment in attachments {
+        let media_type = image_type(attachment);
+        let limit = if media_type.is_some() {
+            MAX_IMAGE_BYTES
+        } else {
+            MAX_TEXT_BYTES
+        };
+        if attachment.size > limit {
+            tracing::warn!(
+                "skipping {}: {} bytes",
+                attachment.filename,
+                attachment.size
+            );
+            continue;
+        }
+        let bytes = web
+            .get(&attachment.url)
+            .send()
+            .await
+            .and_then(reqwest::Response::error_for_status)
+            .with_context(|| format!("failed to download {}", attachment.filename))?
+            .bytes()
+            .await
+            .with_context(|| format!("failed to download {}", attachment.filename))?;
+        if media_type.is_some() {
+            images.push(Image {
+                data: DocumentSourceKind::Base64(
+                    base64::engine::general_purpose::STANDARD.encode(bytes),
+                ),
+                media_type,
+                ..Image::default()
+            });
+        } else {
+            text.push_str(&format!(
+                "\n\n[{}]\n{}",
+                attachment.filename,
+                String::from_utf8_lossy(&bytes)
+            ));
+        }
+    }
+    Ok((text, images))
 }
 
 /// Wraps `text` in a code fence, cut to `max` characters, so it can't break out of the fence.

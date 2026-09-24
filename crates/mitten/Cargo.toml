@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 anyhow = "1.0.104"
+base64 = "0.22"
 chromiumoxide = "0.9.1"
 futures = "0.3"
 html2text = "0.17.1"

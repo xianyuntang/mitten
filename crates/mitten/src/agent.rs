@@ -9,7 +9,9 @@ use rig_core::completion::{
     CompletionError, CompletionModel, CompletionRequest, CompletionResponse, FinishReason,
     ToolDefinition,
 };
-use rig_core::message::{AssistantContent, Message, ToolCall, ToolResultContent, UserContent};
+use rig_core::message::{
+    AssistantContent, Image, Message, ToolCall, ToolResultContent, UserContent,
+};
 use rig_core::providers::{anthropic, openai};
 use serde_json::{Value, json};
 use tokio::process::Command;
@@ -383,11 +385,17 @@ impl Agent {
     /// Runs one user turn to completion, looping while the model calls tools, then saves it.
     /// On failure the turn is cut back to its last complete tool round so the history stays valid;
     /// rounds whose commands already ran are kept, so the model knows what changed.
-    pub async fn run_turn(&mut self, prompt: &str, io: &mut impl Io) -> Result<()> {
+    /// `images` go to the model alongside `prompt`.
+    pub async fn run_turn(
+        &mut self,
+        prompt: &str,
+        images: Vec<Image>,
+        io: &mut impl Io,
+    ) -> Result<()> {
         self.reload()?;
         self.compact_if_needed(prompt, io).await?;
         let turn_start = self.messages.len();
-        let result = self.drive(prompt, io).await;
+        let result = self.drive(prompt, images, io).await;
         if let Err(err) = &result {
             let kept = completed_rounds_end(&self.messages, turn_start);
             self.messages.truncate(kept);
@@ -471,8 +479,14 @@ impl Agent {
         Ok(())
     }
 
-    async fn drive(&mut self, prompt: &str, io: &mut impl Io) -> Result<()> {
-        self.messages.push(Message::user(prompt));
+    async fn drive(&mut self, prompt: &str, images: Vec<Image>, io: &mut impl Io) -> Result<()> {
+        // An image sent alone has no text; providers reject empty text blocks.
+        let content = (!prompt.is_empty())
+            .then(|| UserContent::text(prompt))
+            .into_iter()
+            .chain(images.into_iter().map(UserContent::Image))
+            .collect();
+        self.messages.push(Message::User { content });
         loop {
             let response = self
                 .model

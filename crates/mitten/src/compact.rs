@@ -1,7 +1,9 @@
 //! Conversation compaction: when history grows past a token budget, older turns are replaced by a
 //! model-written summary so requests stay within the model's context window.
 
-use rig_core::message::{AssistantContent, Message, ToolResultContent, UserContent};
+use rig_core::message::{
+    AssistantContent, DocumentSourceKind, Message, ToolResultContent, UserContent,
+};
 
 /// Instructions for the summarizing request.
 pub const SYSTEM: &str = "\
@@ -17,12 +19,32 @@ const SUMMARY_HEADER: &str = "[Summary of the earlier conversation, written when
 /// Tool output characters kept per result in the transcript sent for summarizing.
 const MAX_TOOL_OUTPUT_CHARS: usize = 2_000;
 
-/// Rough token count: serialized characters / 3, between English (~4 per token) and CJK (~1-2).
+/// Rough cost of one image; providers bill by pixels, not by the size of its base64 data.
+const IMAGE_TOKENS: usize = 1_500;
+
+/// Rough token count: serialized characters / 3, between English (~4 per token) and CJK (~1-2),
+/// with each image's data counted as `IMAGE_TOKENS` instead.
 // ponytail: heuristic; switch to the provider's reported usage if the estimate misfires.
 pub fn estimate_tokens(messages: &[Message]) -> usize {
     messages
         .iter()
-        .map(|m| serde_json::to_string(m).map_or(0, |s| s.chars().count()))
+        .map(|m| {
+            let chars = serde_json::to_string(m).map_or(0, |s| s.chars().count());
+            let images: Vec<usize> = match m {
+                Message::User { content } => content
+                    .iter()
+                    .filter_map(|c| match c {
+                        UserContent::Image(image) => match &image.data {
+                            DocumentSourceKind::Base64(data) => Some(data.len()),
+                            _ => Some(0),
+                        },
+                        _ => None,
+                    })
+                    .collect(),
+                _ => Vec::new(),
+            };
+            chars.saturating_sub(images.iter().sum()) + images.len() * IMAGE_TOKENS * 3
+        })
         .sum::<usize>()
         / 3
 }
@@ -63,6 +85,7 @@ pub fn transcript(messages: &[Message]) -> String {
                             let more = if cut.len() < text.len() { " […]" } else { "" };
                             out.push(format!("Tool result ({}): {cut}{more}", result.name));
                         }
+                        UserContent::Image(_) => out.push("User: [image]".to_owned()),
                         _ => out.push("User: [attachment]".to_owned()),
                     }
                 }
@@ -97,6 +120,20 @@ pub fn summary_messages(summary: &str) -> [Message; 2] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn estimate_counts_images_as_fixed_cost() {
+        let image = |len| Message::User {
+            content: vec![UserContent::Image(rig_core::message::Image {
+                data: DocumentSourceKind::Base64("A".repeat(len)),
+                ..Default::default()
+            })],
+        };
+        let small = estimate_tokens(&[image(10)]);
+        let big = estimate_tokens(&[image(3_000_000)]);
+        assert_eq!(small, big);
+        assert!((IMAGE_TOKENS..IMAGE_TOKENS + 100).contains(&big), "{big}");
+    }
 
     fn turn(prompt: &str, reply: &str) -> [Message; 2] {
         [Message::user(prompt), Message::assistant(reply)]
