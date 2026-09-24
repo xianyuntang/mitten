@@ -4,6 +4,7 @@ mod compact;
 mod config;
 mod db;
 mod discord;
+mod fetch;
 mod memory;
 mod onboarding;
 mod search;

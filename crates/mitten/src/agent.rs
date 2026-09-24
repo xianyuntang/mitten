@@ -17,6 +17,7 @@ use tokio::process::Command;
 use crate::compact;
 use crate::config::{Api, Config};
 use crate::db::Db;
+use crate::fetch::{self, Fetcher};
 use crate::memory;
 use crate::search;
 use crate::search::WebSearch;
@@ -206,7 +207,7 @@ fn request(config: &Config, system: &str, messages: &[Message]) -> CompletionReq
             .chain(messages.iter().cloned())
             .collect(),
         documents: Vec::new(),
-        tools: [bash_tool(), memory::tool()]
+        tools: [bash_tool(), memory::tool(), fetch::tool()]
             .into_iter()
             .chain(config.searxng.is_some().then(search::tool))
             .collect(),
@@ -230,6 +231,7 @@ pub struct Agent {
     memory_id: i64,
     /// Set when `[tools.searxng]` is configured.
     search: Option<WebSearch>,
+    fetcher: Fetcher,
     key: String,
     system: String,
     messages: Vec<Message>,
@@ -257,6 +259,7 @@ impl Agent {
             conversation_id: conversation.id,
             memory_id,
             search,
+            fetcher: Fetcher::new()?,
             key: key.to_owned(),
             system,
             messages,
@@ -432,6 +435,18 @@ impl Agent {
                 let output = match call.function.name.as_str() {
                     "bash" => run_bash(call, io, self.config.bash_timeout).await?,
                     "memory" => self.remember(&call.function.arguments, io).await?,
+                    "fetch_url" => {
+                        let args = &call.function.arguments;
+                        if let Some(url) = args["url"].as_str() {
+                            let verb = if args["render"].as_bool().unwrap_or(false) {
+                                "rendering"
+                            } else {
+                                "reading"
+                            };
+                            io.note(&format!("🌐 {verb}: {url}")).await?;
+                        }
+                        self.fetcher.run(args).await
+                    }
                     "web_search" if self.search.is_some() => {
                         self.web_search(&call.function.arguments, io).await?
                     }

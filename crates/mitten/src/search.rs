@@ -22,8 +22,8 @@ search is rarely enough. Start broad, then rephrase: different keywords and syno
 terms (names, versions, error messages, dates), both English and the user's language, and \
 site:domain or \"exact phrase\" to target good sources. Compare what the results say and prefer \
 official or primary sources. If results are thin or disagree, keep searching with new queries \
-instead of guessing. Snippets are short excerpts; when you need a page's details, fetch it with bash \
-(curl). Name the URLs your answer relies on.";
+instead of guessing. Snippets are short excerpts; when you need a page's details or the snippets \
+look thin, read the most promising results with fetch_url. Name the URLs your answer relies on.";
 
 pub fn tool() -> ToolDefinition {
     ToolDefinition {

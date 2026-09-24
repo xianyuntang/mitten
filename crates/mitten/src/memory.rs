@@ -17,8 +17,11 @@ pub const GUIDANCE: &str = "\
 You have long-term memory for this conversation (this terminal, or this Discord channel and all \
 of its threads); it survives /new and is loaded whenever a conversation starts. Other channels \
 have their own. \
-Save with the memory tool only facts that matter from now on: who you are talking to, their \
-preferences, stable facts about this machine, standing conventions. \
+Save with the memory tool facts that matter from now on: who you are talking to, their \
+preferences, names or roles they give you, stable facts about this machine, standing conventions. \
+When the user asks you to remember something, or tells you such a fact, call the memory tool in \
+that same response. Never say you remembered or noted something unless the memory tool call \
+succeeded; replying \"noted\" without the call saves nothing. \
 Skip task progress, things that are easy to rediscover, and anything stale within a week. \
 Write declarative facts (\"User prefers short answers\"), not instructions to yourself. \
 When memory is full, replace or merge stale entries instead of skipping the save.";
