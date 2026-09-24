@@ -21,9 +21,12 @@ use crate::fetch::{self, Fetcher};
 use crate::memory;
 use crate::search;
 use crate::search::WebSearch;
+use crate::settings;
 
 // ponytail: hard cap on tool output fed back to the model; summarize or page if it bites.
 const MAX_OUTPUT_CHARS: usize = 30_000;
+/// How long a new model gets to answer its test request before a switch is refused.
+const PING_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Where the agent talks to the user: the terminal or a chat channel.
 pub trait Io {
@@ -207,7 +210,7 @@ fn request(config: &Config, system: &str, messages: &[Message]) -> CompletionReq
             .chain(messages.iter().cloned())
             .collect(),
         documents: Vec::new(),
-        tools: [bash_tool(), memory::tool(), fetch::tool()]
+        tools: [bash_tool(), memory::tool(), fetch::tool(), settings::tool()]
             .into_iter()
             .chain(config.searxng.is_some().then(search::tool))
             .collect(),
@@ -297,6 +300,81 @@ impl Agent {
         Ok(search.run(args).await)
     }
 
+    /// Runs one settings tool call; a new model must answer a test request before it is saved.
+    async fn settings(&mut self, args: &Value, io: &mut impl Io) -> Result<String> {
+        match args["action"].as_str() {
+            Some("get") => return Ok(settings::show(&self.config)),
+            Some("set") => {}
+            _ => return Ok("error: action must be `get` or `set`".to_owned()),
+        }
+        let key = args["key"].as_str().unwrap_or_default();
+        let path = self.config.path.clone();
+        let text = match std::fs::read_to_string(&path) {
+            Ok(text) => text,
+            Err(err) => return Ok(format!("error: cannot read {}: {err}", path.display())),
+        };
+        let (text, fresh) = match settings::edit(&text, key, &args["value"]) {
+            Ok(edited) => edited,
+            Err(err) => return Ok(format!("error: {err:#}")),
+        };
+        let value = args["value"].to_string();
+        if !io
+            .confirm(&format!("set {key} = {value} in {}", path.display()))
+            .await?
+        {
+            return Ok("error: the user denied this change".to_owned());
+        }
+        if fresh.model != self.config.model {
+            let ping = tokio::time::timeout(PING_TIMEOUT, ping(&fresh)).await;
+            if let Some(err) = match ping {
+                Err(_) => Some(format!("no reply in {PING_TIMEOUT:?}")),
+                Ok(Err(err)) => Some(format!("{err:#}")),
+                Ok(Ok(_)) => None,
+            } {
+                let output = format!("{} did not answer a test request: {err}", fresh.model);
+                io.ran(&output, false).await?;
+                return Ok(format!("error: {output}; nothing was saved"));
+            }
+        }
+        if let Err(err) = crate::config::write(&path, &text) {
+            io.ran(&format!("{err:#}"), false).await?;
+            return Ok(format!("error: {err:#}"));
+        }
+        io.ran("saved", true).await?;
+        self.apply(fresh)?;
+        Ok(format!(
+            "saved; {key} = {value} applies from the next request"
+        ))
+    }
+
+    /// Takes model and tool settings from `fresh`, rebuilding the client if the endpoint changed.
+    /// Web search, Discord, and storage keep their startup values until restart.
+    fn apply(&mut self, fresh: Config) -> Result<()> {
+        let old = &self.config;
+        if fresh.model != old.model
+            || fresh.api != old.api
+            || fresh.base_url != old.base_url
+            || fresh.api_key.as_str() != old.api_key.as_str()
+        {
+            self.model = Model::new(&fresh, &format!("mitten-{}", self.conversation_id))?;
+        }
+        let searxng = self.config.searxng.take();
+        self.config = Config { searxng, ..fresh };
+        Ok(())
+    }
+
+    /// Picks up config edits made elsewhere: another conversation, `mitten configure`, or by hand.
+    /// A file that no longer loads is logged and the current settings stay.
+    fn reload(&mut self) -> Result<()> {
+        match Config::load(&self.config.path) {
+            Ok(fresh) => self.apply(fresh),
+            Err(err) => {
+                tracing::warn!("keeping current settings: {err:#}");
+                Ok(())
+            }
+        }
+    }
+
     /// Whether this conversation picked up stored history.
     pub fn is_resumed(&self) -> bool {
         !self.messages.is_empty()
@@ -306,6 +384,7 @@ impl Agent {
     /// On failure the turn is cut back to its last complete tool round so the history stays valid;
     /// rounds whose commands already ran are kept, so the model knows what changed.
     pub async fn run_turn(&mut self, prompt: &str, io: &mut impl Io) -> Result<()> {
+        self.reload()?;
         self.compact_if_needed(prompt, io).await?;
         let turn_start = self.messages.len();
         let result = self.drive(prompt, io).await;
@@ -435,6 +514,7 @@ impl Agent {
                 let output = match call.function.name.as_str() {
                     "bash" => run_bash(call, io, self.config.bash_timeout).await?,
                     "memory" => self.remember(&call.function.arguments, io).await?,
+                    "settings" => self.settings(&call.function.arguments, io).await?,
                     "fetch_url" => {
                         let args = &call.function.arguments;
                         if let Some(url) = args["url"].as_str() {

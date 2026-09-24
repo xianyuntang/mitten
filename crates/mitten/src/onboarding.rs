@@ -13,10 +13,10 @@ use ratatui::widgets::{Block, Clear, List, ListState, Paragraph};
 use tokio::runtime::Handle;
 
 use crate::agent;
-use crate::config::Config;
+use crate::config::{self, Config};
 
 /// Common OpenCode Go models; `config::Api::for_model` picks each one's endpoint format.
-const MODELS: &[&str] = &[
+pub const MODELS: &[&str] = &[
     "minimax-m3",
     "minimax-m2.7",
     "qwen3.8-max",
@@ -48,7 +48,10 @@ pub async fn run(path: &Path) -> Result<Config> {
     match saved {
         Some(config) => {
             println!("✓ saved {}", path.display());
-            Ok(config)
+            Ok(Config {
+                path: path.to_owned(),
+                ..config
+            })
         }
         None => bail!("not saved"),
     }
@@ -408,7 +411,7 @@ impl Form {
                 return Ok(None);
             }
         }
-        save(path, &text)?;
+        config::write(path, &text)?;
         Ok(Some(config))
     }
 
@@ -720,33 +723,6 @@ fn render_toml(answers: &Answers) -> String {
         ));
     }
     text
-}
-
-/// Writes the config readable only by the user, keeping the previous file as `.bak`.
-fn save(path: &Path, text: &str) -> Result<()> {
-    use std::io::Write;
-    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
-
-    if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir)
-            .with_context(|| format!("failed to create {}", dir.display()))?;
-    }
-    if path.exists() {
-        let backup = path.with_extension("toml.bak");
-        std::fs::copy(path, &backup)
-            .with_context(|| format!("failed to back up to {}", backup.display()))?;
-    }
-    let mut file = std::fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .mode(0o600)
-        .open(path)
-        .with_context(|| format!("failed to write {}", path.display()))?;
-    // `mode` only applies on creation; tighten an existing file too.
-    file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
-    file.write_all(text.as_bytes())
-        .with_context(|| format!("failed to write {}", path.display()))
 }
 
 #[cfg(test)]

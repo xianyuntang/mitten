@@ -218,6 +218,8 @@ pub struct Config {
     pub discord: Option<DiscordSection>,
     /// SQLite file holding conversation history.
     pub database_path: PathBuf,
+    /// File this was loaded from; empty when parsed from text.
+    pub path: PathBuf,
 }
 
 impl Config {
@@ -227,7 +229,12 @@ impl Config {
         }
         let text = std::fs::read_to_string(path)
             .with_context(|| format!("failed to read config {}", path.display()))?;
-        Self::parse(&text).with_context(|| format!("invalid config {}", path.display()))
+        let config =
+            Self::parse(&text).with_context(|| format!("invalid config {}", path.display()))?;
+        Ok(Self {
+            path: path.to_owned(),
+            ..config
+        })
     }
 
     pub fn parse(text: &str) -> Result<Self> {
@@ -274,8 +281,36 @@ impl Config {
             log_level: file.log.level,
             discord: file.discord,
             database_path,
+            path: PathBuf::new(),
         })
     }
+}
+
+/// Writes the config readable only by the user, keeping the previous file as `.bak`.
+pub fn write(path: &Path, text: &str) -> Result<()> {
+    use std::io::Write;
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)
+            .with_context(|| format!("failed to create {}", dir.display()))?;
+    }
+    if path.exists() {
+        let backup = path.with_extension("toml.bak");
+        std::fs::copy(path, &backup)
+            .with_context(|| format!("failed to back up to {}", backup.display()))?;
+    }
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(path)
+        .with_context(|| format!("failed to write {}", path.display()))?;
+    // `mode` only applies on creation; tighten an existing file too.
+    file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+    file.write_all(text.as_bytes())
+        .with_context(|| format!("failed to write {}", path.display()))
 }
 
 #[cfg(test)]

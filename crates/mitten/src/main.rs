@@ -9,6 +9,7 @@ mod memory;
 mod onboarding;
 mod search;
 mod service;
+mod settings;
 
 use std::io::IsTerminal;
 use std::path::PathBuf;

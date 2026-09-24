@@ -62,7 +62,11 @@ pub fn tool() -> ToolDefinition {
 /// The saved entries as they appear in the system prompt.
 pub fn snapshot(entries: &[Memory]) -> String {
     if entries.is_empty() {
-        return "Saved facts: none yet.".to_owned();
+        return "Saved facts: none yet. You have not met this user here. Before anything else, \
+                briefly introduce yourself and ask who they are and what to call them; hold off on \
+                their request until they answer. When they do, save it with the memory tool, then \
+                carry on with what they first asked."
+            .to_owned();
     }
     let list: Vec<String> = entries.iter().map(|e| format!("- {}", e.content)).collect();
     format!("Saved facts:\n{}", list.join("\n"))
