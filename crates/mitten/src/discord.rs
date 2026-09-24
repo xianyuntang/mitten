@@ -202,7 +202,7 @@ async fn route(ctx: &Context, msg: &Message) -> Result<(ChannelId, ChannelId)> {
     Ok(match channel.kind {
         ChannelType::Text | ChannelType::News => {
             let thread = CreateThread::new(thread_name(&msg.content))
-                .auto_archive_duration(AutoArchiveDuration::OneDay);
+                .auto_archive_duration(AutoArchiveDuration::OneHour);
             let thread = here
                 .create_thread_from_message(&ctx.http, msg.id, thread)
                 .await?;
