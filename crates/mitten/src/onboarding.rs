@@ -32,7 +32,14 @@ pub const MODELS: &[&str] = &[
 const CUSTOM: &str = "Custom…";
 const ENABLED: &str = "Enabled";
 const DISABLED: &str = "Disabled";
-const STEPS: [&str; 5] = ["Model", "Discord", "Web search", "MCP", "Advanced"];
+const STEPS: [&str; 6] = [
+    "Model",
+    "Discord",
+    "Web search",
+    "MCP",
+    "Claude Code",
+    "Advanced",
+];
 const NO: &str = "No";
 const STDIO: &str = "Local command (stdio)";
 const HTTP: &str = "Remote URL (HTTP)";
@@ -41,6 +48,7 @@ const REMOVE: &str = "Remove";
 const ASK: &str = "Ask every call";
 const ASK_ME: &str = "Ask me every time";
 const AUTO: &str = "Auto (LLM review)";
+const SAME_MODEL: &str = "Same as main model";
 const NEVER_ASK: &str = "Never ask";
 const PING_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -103,8 +111,13 @@ const MCP_URL: usize = 18;
 const MCP_TOKEN: usize = 19;
 const MCP_APPROVE: usize = 20;
 const APPROVAL: usize = 21;
+const REVIEWER: usize = 22;
+const CLAUDE: usize = 23;
+const CLAUDE_DIRS: usize = 24;
+const CLAUDE_MODE: usize = 25;
+const CLAUDE_TOOLS: usize = 26;
 /// First of the rows for already configured MCP servers.
-const MCP_FIRST: usize = 22;
+const MCP_FIRST: usize = 27;
 
 /// Focus value for the Save button under the fields.
 const BUTTON: usize = usize::MAX;
@@ -121,10 +134,10 @@ struct Form {
     force_save: bool,
     /// `tools.searxng.results`, not on the form; kept so saving doesn't reset a hand-edited value.
     search_results: usize,
+    /// `tools.claude_code` timeout and command, not on the form; kept like `search_results`.
+    claude_extra: (u64, String),
     /// Configured MCP servers, one Keep / Remove row each from `MCP_FIRST` on.
     mcp_names: Vec<String>,
-    /// `approval.model`, not on the form; kept so saving doesn't reset a hand-edited reviewer.
-    review_model: Option<String>,
 }
 
 fn options(values: &[&str]) -> Vec<String> {
@@ -249,13 +262,13 @@ impl Form {
                     .unwrap_or_default(),
             ),
             field(
-                4,
+                5,
                 "Log level",
                 Kind::Select(options_with(&["error", "warn", "info", "debug"], log)),
                 log.to_owned(),
             ),
             field(
-                4,
+                5,
                 "Database",
                 Kind::Text,
                 database.to_string_lossy().into_owned(),
@@ -281,10 +294,57 @@ impl Form {
         ];
         let auto = current.is_some_and(|c| matches!(c.approval, config::Approval::Auto { .. }));
         fields.push(field(
-            4,
+            5,
             "Approval",
             Kind::Select(options(&[ASK_ME, AUTO])),
             if auto { AUTO } else { ASK_ME }.to_owned(),
+        ));
+        let reviewer = match current.map(|c| (&c.approval, &c.model)) {
+            Some((config::Approval::Auto { model }, main)) if model != main => model.as_str(),
+            _ => SAME_MODEL,
+        };
+        let mut reviewers = vec![SAME_MODEL];
+        reviewers.extend(MODELS);
+        fields.push(field(
+            5,
+            "Reviewer model",
+            Kind::Select(options_with(&reviewers, reviewer)),
+            reviewer.to_owned(),
+        ));
+        let claude = current.and_then(|c| c.claude_code.as_ref());
+        fields.push(field(
+            4,
+            "Claude Code",
+            Kind::Select(options(&[DISABLED, ENABLED])),
+            if claude.is_some() { ENABLED } else { DISABLED }.to_owned(),
+        ));
+        fields.push(field(
+            4,
+            "Directories",
+            Kind::Text,
+            claude.map_or_else(
+                || "~/repos".to_owned(),
+                |c| {
+                    c.dirs
+                        .iter()
+                        .map(|d| d.display().to_string())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                },
+            ),
+        ));
+        let mode = claude.map_or(config::CLAUDE_CODE_MODES[0], |c| c.permission_mode.as_str());
+        fields.push(field(
+            4,
+            "Permissions",
+            Kind::Select(options(config::CLAUDE_CODE_MODES)),
+            mode.to_owned(),
+        ));
+        fields.push(field(
+            4,
+            "Allowed tools",
+            Kind::Text,
+            claude.map_or_else(String::new, |c| c.allowed_tools.join(", ")),
         ));
         let mcp_names: Vec<String> = current
             .map(|c| c.mcp.keys().cloned().collect())
@@ -306,10 +366,11 @@ impl Form {
             status: Line::default(),
             force_save: false,
             search_results: searxng.map_or(5, |s| s.results),
-            review_model: current.and_then(|c| match &c.approval {
-                config::Approval::Auto { model } if *model != c.model => Some(model.clone()),
-                _ => None,
-            }),
+            claude_extra: current
+                .and_then(|c| c.claude_code.as_ref())
+                .map_or((1800, "claude".to_owned()), |c| {
+                    (c.timeout.as_secs(), c.command.clone())
+                }),
             mcp_names,
         })
     }
@@ -324,6 +385,8 @@ impl Form {
                 MCP_NAME | MCP_APPROVE => self.fields[MCP_ADD].value != NO,
                 MCP_COMMAND | MCP_ARGS | MCP_ENV => self.fields[MCP_ADD].value == STDIO,
                 MCP_URL | MCP_TOKEN => self.fields[MCP_ADD].value == HTTP,
+                REVIEWER => self.fields[APPROVAL].value == AUTO,
+                CLAUDE_DIRS | CLAUDE_MODE | CLAUDE_TOOLS => self.fields[CLAUDE].value == ENABLED,
                 _ => true,
             }
     }
@@ -517,6 +580,9 @@ impl Form {
             3 => {
                 self.mcp()?;
             }
+            4 => {
+                self.claude_code()?;
+            }
             _ => {
                 self.required(DATABASE)?;
             }
@@ -559,6 +625,32 @@ impl Form {
             url,
             auth,
             results: self.search_results,
+        }))
+    }
+
+    fn claude_code(&self) -> std::result::Result<Option<ClaudeAnswers>, String> {
+        if self.fields[CLAUDE].value != ENABLED {
+            return Ok(None);
+        }
+        let list = |i| -> Vec<String> {
+            self.value(i)
+                .split(',')
+                .map(str::trim)
+                .filter(|part| !part.is_empty())
+                .map(str::to_owned)
+                .collect()
+        };
+        let dirs = list(CLAUDE_DIRS);
+        if dirs.is_empty() {
+            return Err("list at least one directory Claude Code may work in".to_owned());
+        }
+        let (timeout_secs, command) = self.claude_extra.clone();
+        Ok(Some(ClaudeAnswers {
+            dirs,
+            permission_mode: self.value(CLAUDE_MODE),
+            allowed_tools: list(CLAUDE_TOOLS),
+            timeout_secs,
+            command,
         }))
     }
 
@@ -628,8 +720,12 @@ impl Form {
             model: self.model()?,
             discord: self.discord()?,
             search: self.search()?,
+            claude_code: self.claude_code()?,
             log_level: self.required(LOG)?,
-            auto_approval: (self.fields[APPROVAL].value == AUTO).then(|| self.review_model.clone()),
+            auto_approval: (self.fields[APPROVAL].value == AUTO).then(|| {
+                let reviewer = self.value(REVIEWER);
+                (reviewer != SAME_MODEL).then_some(reviewer)
+            }),
             database: PathBuf::from(self.required(DATABASE)?),
         })
     }
@@ -783,11 +879,20 @@ struct SearchAnswers {
     results: usize,
 }
 
+struct ClaudeAnswers {
+    dirs: Vec<String>,
+    permission_mode: String,
+    allowed_tools: Vec<String>,
+    timeout_secs: u64,
+    command: String,
+}
+
 struct Answers {
     model: String,
     api_key: String,
     discord: Option<DiscordAnswers>,
     search: Option<SearchAnswers>,
+    claude_code: Option<ClaudeAnswers>,
     log_level: String,
     /// `Some` for auto approval, holding the reviewer model if it isn't the main one.
     auto_approval: Option<Option<String>>,
@@ -859,6 +964,20 @@ fn render_toml(answers: &Answers) -> String {
         if let Some(model) = reviewer {
             text.push_str(&format!("model = {}\n", quote(model)));
         }
+    }
+    if let Some(claude) = &answers.claude_code {
+        let array = |items: &[String]| {
+            toml::Value::Array(items.iter().cloned().map(toml::Value::String).collect()).to_string()
+        };
+        text.push_str(&format!(
+            "\n[tools.claude_code]\ndirs = {}\npermission_mode = {}\nallowed_tools = {}\n\
+             timeout_secs = {}\ncommand = {}\n",
+            array(&claude.dirs),
+            quote(&claude.permission_mode),
+            array(&claude.allowed_tools),
+            claude.timeout_secs,
+            quote(&claude.command),
+        ));
     }
     if let Some(search) = &answers.search {
         text.push_str(&format!(
@@ -961,6 +1080,13 @@ mod tests {
                 token: "tok".to_owned(),
                 allowed_users: vec![1, 22],
             }),
+            claude_code: Some(ClaudeAnswers {
+                dirs: vec!["~/repos".to_owned(), "/srv/app".to_owned()],
+                permission_mode: "plan".to_owned(),
+                allowed_tools: vec!["Bash(cargo test:*)".to_owned()],
+                timeout_secs: 600,
+                command: "claude".to_owned(),
+            }),
             search: Some(SearchAnswers {
                 url: "https://search.example.com".to_owned(),
                 auth: Some(("me".to_owned(), "p\"w".to_owned())),
@@ -972,6 +1098,14 @@ mod tests {
         });
         let config = Config::parse(&text).expect("valid");
         assert_eq!(config.model, "qwen3.8-max");
+        let claude = config.claude_code.clone().expect("claude code");
+        assert_eq!(
+            claude.dirs,
+            [PathBuf::from("~/repos"), PathBuf::from("/srv/app")]
+        );
+        assert_eq!(claude.permission_mode, "plan");
+        assert_eq!(claude.allowed_tools, ["Bash(cargo test:*)"]);
+        assert_eq!(claude.timeout.as_secs(), 600);
         assert_eq!(
             config.approval,
             config::Approval::Auto {

@@ -191,8 +191,8 @@ fn render_plist(exe: &Path, config: &Path, home: &Path, log: &Path) -> String {
     <key>WorkingDirectory</key><string>{home}</string>
     <key>EnvironmentVariables</key>
     <dict>
-        <!-- launchd's default PATH lacks Homebrew and cargo, which MCP servers (npx, uvx) and the headless Chrome lookup need. -->
-        <key>PATH</key><string>{home}/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+        <!-- launchd's default PATH lacks Homebrew and cargo, which MCP servers (npx, uvx), claude, and the headless Chrome lookup need. -->
+        <key>PATH</key><string>{home}/.cargo/bin:{home}/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
     </dict>
     <key>RunAtLoad</key><true/>
     <key>KeepAlive</key><true/>
@@ -226,6 +226,10 @@ mod tests {
         assert!(plist.contains("<string>serve</string>"));
         assert!(plist.contains("<string>/cfg/a&amp;b.toml</string>"));
         assert!(plist.contains("<key>KeepAlive</key><true/>"));
+        assert!(
+            plist.contains("/home/.local/bin:"),
+            "claude installs to ~/.local/bin"
+        );
     }
 
     #[test]

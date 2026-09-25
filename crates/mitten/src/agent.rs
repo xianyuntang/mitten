@@ -16,6 +16,7 @@ use rig_core::message::{
 use rig_core::providers::{anthropic, openai};
 use serde_json::{Value, json};
 
+use crate::claude_code;
 use crate::compact;
 use crate::config::{Api, Config};
 use crate::db::Db;
@@ -181,20 +182,23 @@ When the obvious interpretation is clear, act; ask only when the ambiguity chang
 
 /// Stable text first, per-session details last, so the provider can cache the prefix.
 /// Memory is read once here, so edits show up from the next conversation (or `/new`) on.
-/// `search` adds the web search guidance when the `web_search` tool is available.
-async fn system_prompt(db: &Db, memory_id: i64, key: &str, search: bool) -> Result<String> {
+/// Web search and Claude Code guidance are added when those tools are configured.
+async fn system_prompt(db: &Db, memory_id: i64, key: &str, config: &Config) -> Result<String> {
     let cwd = std::env::current_dir().context("failed to read current directory")?;
     let memories = db
         .memories(memory_id)
         .await
         .context("failed to load memory")?;
-    let search = if search {
+    let mut tools = if config.searxng.is_some() {
         format!("{}\n\n", search::GUIDANCE)
     } else {
         String::new()
     };
+    if let Some(claude_code) = &config.claude_code {
+        tools.push_str(&format!("{}\n\n", claude_code::guidance(claude_code)));
+    }
     Ok(format!(
-        "{IDENTITY}\n\n{search}{guidance}\n\n{hint}\n\n{saved}\n\nOS: {os}. Working directory: {cwd}.",
+        "{IDENTITY}\n\n{tools}{guidance}\n\n{hint}\n\n{saved}\n\nOS: {os}. Working directory: {cwd}.",
         guidance = memory::GUIDANCE,
         hint = platform_hint(key),
         saved = memory::snapshot(&memories),
@@ -288,6 +292,7 @@ fn request(
         ]
         .into_iter()
         .chain(config.searxng.is_some().then(search::tool))
+        .chain(config.claude_code.as_ref().map(claude_code::tool))
         .chain(extra.iter().cloned())
         .collect(),
         temperature: None,
@@ -339,7 +344,7 @@ impl Agent {
             .map(|row| serde_json::from_value(row.content))
             .collect::<Result<Vec<Message>, _>>()
             .context("stored conversation is unreadable; send /new to start over")?;
-        let system = system_prompt(&db, memory_id, key, config.searxng.is_some()).await?;
+        let system = system_prompt(&db, memory_id, key, &config).await?;
         let search = config.searxng.clone().map(WebSearch::new).transpose()?;
         Ok(Self {
             model: Model::new(&config, &format!("mitten-{}", conversation.id))?,
@@ -573,8 +578,7 @@ impl Agent {
         self.db.clear(self.conversation_id).await?;
         self.messages.clear();
         // A fresh conversation picks up memory saved since the last one started.
-        self.system =
-            system_prompt(&self.db, self.memory_id, &self.key, self.search.is_some()).await?;
+        self.system = system_prompt(&self.db, self.memory_id, &self.key, &self.config).await?;
         Ok(())
     }
 
@@ -631,6 +635,12 @@ impl Agent {
             for call in &calls {
                 let output = match call.function.name.as_str() {
                     "now" => now().await,
+                    "claude_code" => match &self.config.claude_code {
+                        Some(config) => {
+                            claude_code::run(config, &call.function.arguments, io).await?
+                        }
+                        None => "error: claude_code is not configured".to_owned(),
+                    },
                     "read_file" => {
                         let args = &call.function.arguments;
                         if let Some(path) = args["path"].as_str() {

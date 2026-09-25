@@ -103,6 +103,74 @@ struct ToolsSection {
     #[serde(default, rename = "bash")]
     _bash: Option<serde::de::IgnoredAny>,
     searxng: Option<SearxngSection>,
+    claude_code: Option<ClaudeCodeSection>,
+}
+
+/// `[tools.claude_code]`: lets the model hand coding tasks to Claude Code (`claude -p`).
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ClaudeCodeSection {
+    /// Directories Claude Code may work in, with everything under them.
+    dirs: Vec<PathBuf>,
+    #[serde(default = "ClaudeCodeSection::default_permission_mode")]
+    permission_mode: String,
+    /// Passed as `--allowedTools`, e.g. `Bash(cargo test:*)`.
+    #[serde(default)]
+    allowed_tools: Vec<String>,
+    #[serde(default = "ClaudeCodeSection::default_timeout_secs")]
+    timeout_secs: u64,
+    #[serde(default = "ClaudeCodeSection::default_command")]
+    command: String,
+}
+
+/// Modes that can't skip Claude Code's own permission checks; `bypassPermissions` is refused.
+pub const CLAUDE_CODE_MODES: &[&str] = &["acceptEdits", "plan", "default"];
+
+impl ClaudeCodeSection {
+    fn default_permission_mode() -> String {
+        "acceptEdits".to_owned()
+    }
+
+    fn default_timeout_secs() -> u64 {
+        1800
+    }
+
+    fn default_command() -> String {
+        "claude".to_owned()
+    }
+
+    fn validate(self) -> Result<ClaudeCode> {
+        if self.dirs.is_empty() {
+            bail!("tools.claude_code.dirs is empty; list the directories Claude Code may work in");
+        }
+        if !CLAUDE_CODE_MODES.contains(&self.permission_mode.as_str()) {
+            bail!(
+                "tools.claude_code.permission_mode must be one of {}",
+                CLAUDE_CODE_MODES.join(", ")
+            );
+        }
+        if self.timeout_secs == 0 {
+            bail!("tools.claude_code.timeout_secs must be positive");
+        }
+        Ok(ClaudeCode {
+            dirs: self.dirs,
+            permission_mode: self.permission_mode,
+            allowed_tools: self.allowed_tools,
+            timeout: std::time::Duration::from_secs(self.timeout_secs),
+            command: self.command,
+        })
+    }
+}
+
+/// Validated `[tools.claude_code]`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClaudeCode {
+    /// As written; `~/` is expanded when used.
+    pub dirs: Vec<PathBuf>,
+    pub permission_mode: String,
+    pub allowed_tools: Vec<String>,
+    pub timeout: std::time::Duration,
+    pub command: String,
 }
 
 /// `[tools.searxng]`: a SearXNG instance for the `web_search` tool, optionally behind basic auth.
@@ -278,6 +346,8 @@ pub struct Config {
     pub base_url: String,
     /// Enables the `web_search` tool when set.
     pub searxng: Option<Searxng>,
+    /// Enables the `claude_code` tool when set.
+    pub claude_code: Option<ClaudeCode>,
     /// MCP servers by name.
     pub mcp: BTreeMap<String, McpServer>,
     pub approval: Approval,
@@ -354,6 +424,11 @@ impl Config {
                 .tools
                 .searxng
                 .map(SearxngSection::validate)
+                .transpose()?,
+            claude_code: file
+                .tools
+                .claude_code
+                .map(ClaudeCodeSection::validate)
                 .transpose()?,
             mcp: file.mcp.servers,
             log_level: file.log.level,
@@ -440,6 +515,22 @@ mod tests {
                 model: "kimi-k3".to_owned()
             }
         );
+    }
+
+    #[test]
+    fn claude_code_section_defaults_and_refuses_bypass() {
+        let base = "[opencode-go]\napi_key = \"k\"\n[tools.claude_code]\ndirs = [\"~/repos\"]\n";
+        let cc = Config::parse(base)
+            .expect("valid")
+            .claude_code
+            .expect("set");
+        assert_eq!(cc.permission_mode, "acceptEdits");
+        assert_eq!(cc.timeout.as_secs(), 1800);
+        assert_eq!(cc.command, "claude");
+        let bypass = format!("{base}permission_mode = \"bypassPermissions\"\n");
+        assert!(Config::parse(&bypass).is_err());
+        let empty = "[opencode-go]\napi_key = \"k\"\n[tools.claude_code]\ndirs = []\n";
+        assert!(Config::parse(empty).is_err());
     }
 
     #[test]

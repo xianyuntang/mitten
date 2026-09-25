@@ -28,6 +28,19 @@ api_key = "your-opencode-api-key"
 # # Optional. Results per search, 1-20. Default 5.
 # results = 5
 
+# Optional. Enables the `claude_code` tool: the model hands coding tasks to Claude Code
+# (`claude -p`), which must be installed and logged in. Each task asks for approval first.
+# [tools.claude_code]
+# # Required. Claude Code may only work in these directories and below them.
+# dirs = ["~/repos"]
+# # "acceptEdits" (default) lets it edit files, "plan" only plans, "default" allows neither
+# # without allowed_tools. bypassPermissions is refused.
+# permission_mode = "acceptEdits"
+# # Optional. Tools it may use without asking, e.g. commands it can run.
+# allowed_tools = ["Bash(cargo test:*)", "Bash(git diff:*)"]
+# # Optional. Default 1800.
+# timeout_secs = 1800
+
 # Optional. MCP servers whose tools the model can call, named `<server>__<tool>`.
 # Every call asks you first; set `approve = false` only for servers that can't change anything.
 # A local server over stdio:

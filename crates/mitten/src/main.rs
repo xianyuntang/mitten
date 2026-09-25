@@ -1,5 +1,6 @@
 mod agent;
 mod chat;
+mod claude_code;
 mod compact;
 mod config;
 mod db;
