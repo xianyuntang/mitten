@@ -10,12 +10,7 @@ use crate::config::Config;
 use crate::onboarding::MODELS;
 
 /// The only keys the tool may change, as `section.key`. All but `model.name` hold positive integers.
-const KEYS: &[&str] = &[
-    "model.name",
-    "model.max_tokens",
-    "model.compact_at_tokens",
-    "tools.bash.timeout_secs",
-];
+const KEYS: &[&str] = &["model.name", "model.max_tokens", "model.compact_at_tokens"];
 
 pub fn tool() -> ToolDefinition {
     ToolDefinition {
@@ -46,11 +41,10 @@ pub fn tool() -> ToolDefinition {
 pub fn show(config: &Config) -> String {
     format!(
         "model.name = {}\nmodel.max_tokens = {}\nmodel.compact_at_tokens = {}\n\
-         tools.bash.timeout_secs = {}\nknown models: {}",
+         known models: {}",
         config.model,
         config.max_tokens,
         config.compact_at_tokens,
-        config.bash_timeout.as_secs(),
         MODELS.join(", "),
     )
 }
@@ -113,9 +107,9 @@ mod tests {
         assert_eq!(config.model, "glm-5.3");
         assert_eq!(config.api, crate::config::Api::Openai);
 
-        let (text, config) = edit(BASE, "tools.bash.timeout_secs", &json!("30")).expect("valid");
-        assert!(text.contains("timeout_secs = 30"));
-        assert_eq!(config.bash_timeout.as_secs(), 30);
+        let (text, config) = edit(BASE, "model.max_tokens", &json!("30000")).expect("valid");
+        assert!(text.contains("max_tokens = 30000"));
+        assert_eq!(config.max_tokens, 30_000);
         assert_eq!(config.model, "minimax-m3");
     }
 

@@ -1,7 +1,6 @@
 //! TOML config file: OpenCode Go model and key, tools, logging, storage, and Discord.
 
 use std::path::{Path, PathBuf};
-use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
@@ -95,8 +94,9 @@ struct OpenCodeGoSection {
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ToolsSection {
-    #[serde(default)]
-    bash: BashSection,
+    /// Left over from the removed bash tool; accepted so older configs still load.
+    #[serde(default, rename = "bash")]
+    _bash: Option<serde::de::IgnoredAny>,
     searxng: Option<SearxngSection>,
 }
 
@@ -150,27 +150,6 @@ pub struct Searxng {
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct BashSection {
-    #[serde(default = "BashSection::default_timeout_secs")]
-    timeout_secs: u64,
-}
-
-impl BashSection {
-    fn default_timeout_secs() -> u64 {
-        120
-    }
-}
-
-impl Default for BashSection {
-    fn default() -> Self {
-        Self {
-            timeout_secs: Self::default_timeout_secs(),
-        }
-    }
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
 struct LogSection {
     #[serde(default = "LogSection::default_level")]
     level: String,
@@ -210,7 +189,6 @@ pub struct Config {
     pub api: Api,
     /// OpenCode Go base URL, e.g. `https://opencode.ai/zen/go/v1`.
     pub base_url: String,
-    pub bash_timeout: Duration,
     /// Enables the `web_search` tool when set.
     pub searxng: Option<Searxng>,
     /// `tracing` filter directive, e.g. `warn` or `mitten=debug`.
@@ -272,7 +250,6 @@ impl Config {
             compact_at_tokens,
             api_key: file.opencode_go.api_key,
             base_url: base_url.trim_end_matches('/').to_owned(),
-            bash_timeout: Duration::from_secs(file.tools.bash.timeout_secs),
             searxng: file
                 .tools
                 .searxng
@@ -325,6 +302,12 @@ mod tests {
     }
 
     #[test]
+    fn old_bash_section_still_loads() {
+        let text = "[opencode-go]\napi_key = \"k\"\n\n[tools.bash]\ntimeout_secs = 60\n";
+        assert!(Config::parse(text).is_ok());
+    }
+
+    #[test]
     fn minimal_config_fills_defaults_and_redacts_key() {
         let config = Config::parse(
             r#"
@@ -339,7 +322,6 @@ mod tests {
         assert_eq!(config.compact_at_tokens, 100_000);
         assert_eq!(config.base_url, "http://localhost:8080/v1");
         assert_eq!(Api::for_model("glm-5.3"), Api::Openai);
-        assert_eq!(config.bash_timeout, Duration::from_secs(120));
         assert_eq!(config.log_level, "warn");
         assert!(config.discord.is_none());
         assert!(

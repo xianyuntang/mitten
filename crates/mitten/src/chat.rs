@@ -339,7 +339,10 @@ impl App {
         frame.render_widget(wrapped(self.transcript_lines()).scroll((top, 0)), body);
 
         let (color, status) = if self.confirm.is_some() {
-            (Color::Yellow, " run this command? y yes · n no ".to_owned())
+            (
+                Color::Yellow,
+                " apply this change? y yes · n no ".to_owned(),
+            )
         } else if let Some(start) = self.busy {
             let secs = start.elapsed().as_secs();
             (
@@ -382,7 +385,10 @@ impl App {
             lines.push(
                 Line::from("Ask me to look into or change things on this machine.").dark_gray(),
             );
-            lines.push(Line::from("I only run commands after you approve them.").dark_gray());
+            lines.push(
+                Line::from("I read files and the web; settings changes need your approval.")
+                    .dark_gray(),
+            );
             return lines;
         }
         for entry in &self.entries {

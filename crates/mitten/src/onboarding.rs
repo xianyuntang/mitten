@@ -82,9 +82,8 @@ const SEARCH: usize = 7;
 const SEARCH_URL: usize = 8;
 const SEARCH_USER: usize = 9;
 const SEARCH_PASSWORD: usize = 10;
-const TIMEOUT: usize = 11;
-const LOG: usize = 12;
-const DATABASE: usize = 13;
+const LOG: usize = 11;
+const DATABASE: usize = 12;
 
 /// Focus value for the Next / Save button under the fields.
 const BUTTON: usize = usize::MAX;
@@ -123,9 +122,6 @@ impl Form {
         let search_auth = searxng.and_then(|s| s.auth.as_ref());
         let model = current.map_or(MODELS[0], |c| c.model.as_str());
         let preset = MODELS.contains(&model);
-        let timeout = current
-            .map_or(120, |c| c.bash_timeout.as_secs())
-            .to_string();
         let log = current.map_or("warn", |c| c.log_level.as_str());
         let database = match current {
             Some(c) => c.database_path.clone(),
@@ -226,12 +222,6 @@ impl Form {
                 search_auth
                     .map(|(_, password)| password.as_str().to_owned())
                     .unwrap_or_default(),
-            ),
-            field(
-                3,
-                "Bash timeout (s)",
-                Kind::Select(options_with(&["30", "60", "120", "300", "600"], &timeout)),
-                timeout,
             ),
             field(
                 3,
@@ -441,7 +431,6 @@ impl Form {
                 self.search()?;
             }
             _ => {
-                self.timeout()?;
                 self.required(DATABASE)?;
             }
         }
@@ -486,19 +475,12 @@ impl Form {
         }))
     }
 
-    fn timeout(&self) -> std::result::Result<u64, String> {
-        self.value(TIMEOUT)
-            .parse()
-            .map_err(|_| "Bash timeout must be a whole number of seconds".to_owned())
-    }
-
     fn answers(&self) -> std::result::Result<Answers, String> {
         Ok(Answers {
             api_key: self.required(KEY)?,
             model: self.model()?,
             discord: self.discord()?,
             search: self.search()?,
-            bash_timeout_secs: self.timeout()?,
             log_level: self.required(LOG)?,
             database: PathBuf::from(self.required(DATABASE)?),
         })
@@ -662,7 +644,6 @@ struct Answers {
     api_key: String,
     discord: Option<DiscordAnswers>,
     search: Option<SearchAnswers>,
-    bash_timeout_secs: u64,
     log_level: String,
     database: PathBuf,
 }
@@ -682,9 +663,6 @@ fn render_toml(answers: &Answers) -> String {
          [opencode-go]\n\
          api_key = {key}\n\
          \n\
-         [tools.bash]\n\
-         timeout_secs = {timeout}\n\
-         \n\
          [log]\n\
          level = {log}\n\
          \n\
@@ -692,7 +670,6 @@ fn render_toml(answers: &Answers) -> String {
          path = {db}\n",
         model = quote(&answers.model),
         key = quote(&answers.api_key),
-        timeout = answers.bash_timeout_secs,
         log = quote(&answers.log_level),
         db = quote(&answers.database.to_string_lossy()),
     );
@@ -743,14 +720,12 @@ mod tests {
                 auth: Some(("me".to_owned(), "p\"w".to_owned())),
                 results: 8,
             }),
-            bash_timeout_secs: 60,
             log_level: "info".to_owned(),
             database: PathBuf::from("/tmp/m.db"),
         });
         let config = Config::parse(&text).expect("valid");
         assert_eq!(config.model, "qwen3.8-max");
         assert_eq!(config.api_key.as_str(), "sk-\"quoted\"");
-        assert_eq!(config.bash_timeout.as_secs(), 60);
         assert_eq!(config.discord.map(|d| d.allowed_users), Some(vec![1, 22]));
         let searxng = config.searxng.expect("search section");
         assert_eq!(searxng.url, "https://search.example.com");

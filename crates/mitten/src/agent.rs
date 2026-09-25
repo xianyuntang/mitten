@@ -1,4 +1,4 @@
-//! Agent loop over OpenCode Go via Rig's provider clients, with a user-approved bash tool.
+//! Agent loop over OpenCode Go via Rig's provider clients, with read-only local tools.
 
 use std::time::Duration;
 
@@ -14,19 +14,17 @@ use rig_core::message::{
 };
 use rig_core::providers::{anthropic, openai};
 use serde_json::{Value, json};
-use tokio::process::Command;
 
 use crate::compact;
 use crate::config::{Api, Config};
 use crate::db::Db;
 use crate::fetch::{self, Fetcher};
+use crate::files;
 use crate::memory;
 use crate::search;
 use crate::search::WebSearch;
 use crate::settings;
 
-// ponytail: hard cap on tool output fed back to the model; summarize or page if it bites.
-const MAX_OUTPUT_CHARS: usize = 30_000;
 /// How long a new model gets to answer its test request before a switch is refused.
 const PING_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -34,13 +32,13 @@ const PING_TIMEOUT: Duration = Duration::from_secs(30);
 pub trait Io {
     /// Shows model text to the user.
     async fn say(&mut self, text: &str) -> Result<()>;
-    /// Asks the user to approve `command`; anything but an explicit yes is a no.
-    async fn confirm(&mut self, command: &str) -> Result<bool>;
+    /// Asks the user to approve `action`; anything but an explicit yes is a no.
+    async fn confirm(&mut self, action: &str) -> Result<bool>;
     /// Tells the user about something the agent did on its own, like saving a memory.
     async fn note(&mut self, text: &str) -> Result<()> {
         self.say(text).await
     }
-    /// Reports what an approved command printed and whether it succeeded.
+    /// Reports how an approved action went.
     async fn ran(&mut self, _output: &str, _ok: bool) -> Result<()> {
         Ok(())
     }
@@ -121,13 +119,12 @@ what's verified, and what's left, never a replay of the process. No filler, no r
 When unsure, say so plainly.
 
 # Tools
-Use the bash tool to act; don't describe what you would do. If you say you'll do something, \
-make the call in the same response. Keep going until the task is done and verified.
-Never answer from memory what a command can tell you: time and date, arithmetic, hashes, file contents, \
-system state (OS, disk, ports, processes), git state.
-The user approves every command. If one is denied, don't retry it or a variant; ask what they want instead.
-Prefer non-interactive flags (-y, --no-pager). Each command runs in a fresh shell with a timeout, \
-so cd and exported variables do not persist.
+Your tools read; they never change anything on the machine. You cannot run commands. \
+If you say you'll look something up, make the call in the same response.
+Never answer from memory what a tool can tell you: the time and date (now), file contents \
+(read_file, list_dir). If a task needs a command run or a file changed, say what to run and let the \
+user do it.
+Hidden paths (starting with .) are refused; don't try to get around that.
 If something fails and blocks you, say so and try another route. Never fabricate output.
 When the obvious interpretation is clear, act; ask only when the ambiguity changes what you would run.";
 
@@ -192,15 +189,27 @@ fn pretty_name(os_release: &str) -> Option<String> {
     })
 }
 
-fn bash_tool() -> ToolDefinition {
+fn now_tool() -> ToolDefinition {
     ToolDefinition {
-        name: "bash".to_owned(),
-        description: "Run a bash command on the user's machine and return stdout, stderr, and the exit status.".to_owned(),
-        parameters: json!({
-            "type": "object",
-            "properties": {"command": {"type": "string", "description": "The bash command to run."}},
-            "required": ["command"],
-        }),
+        name: "now".to_owned(),
+        description: "The current local date, time, weekday, and time zone.".to_owned(),
+        parameters: json!({"type": "object", "properties": {}}),
+    }
+}
+
+/// The local time as `date` prints it; the standard library has no time zone support.
+async fn now() -> String {
+    let date = tokio::process::Command::new("date")
+        .arg("+%Y-%m-%d %H:%M:%S %Z (UTC%z), %A")
+        .output()
+        .await;
+    match date {
+        Ok(out) if out.status.success() => String::from_utf8_lossy(&out.stdout).trim().to_owned(),
+        Ok(out) => format!(
+            "error: date failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        ),
+        Err(err) => format!("error: cannot run date: {err}"),
     }
 }
 
@@ -212,10 +221,17 @@ fn request(config: &Config, system: &str, messages: &[Message]) -> CompletionReq
             .chain(messages.iter().cloned())
             .collect(),
         documents: Vec::new(),
-        tools: [bash_tool(), memory::tool(), fetch::tool(), settings::tool()]
-            .into_iter()
-            .chain(config.searxng.is_some().then(search::tool))
-            .collect(),
+        tools: [
+            now_tool(),
+            files::read_tool(),
+            files::list_tool(),
+            memory::tool(),
+            fetch::tool(),
+            settings::tool(),
+        ]
+        .into_iter()
+        .chain(config.searxng.is_some().then(search::tool))
+        .collect(),
         temperature: None,
         max_tokens: Some(u64::from(config.max_tokens)),
         tool_choice: None,
@@ -526,7 +542,15 @@ impl Agent {
             let mut results = Vec::new();
             for call in &calls {
                 let output = match call.function.name.as_str() {
-                    "bash" => run_bash(call, io, self.config.bash_timeout).await?,
+                    "now" => now().await,
+                    "read_file" => {
+                        let args = &call.function.arguments;
+                        if let Some(path) = args["path"].as_str() {
+                            io.note(&format!("📄 reading: {path}")).await?;
+                        }
+                        files::read(&self.config, args).await
+                    }
+                    "list_dir" => files::list(&self.config, &call.function.arguments).await,
                     "memory" => self.remember(&call.function.arguments, io).await?,
                     "settings" => self.settings(&call.function.arguments, io).await?,
                     "fetch_url" => {
@@ -576,64 +600,9 @@ pub async fn ping(config: &Config) -> Result<String> {
         .collect())
 }
 
-/// Runs one bash call after asking the user; failures are reported to the model as text.
-async fn run_bash(call: &ToolCall, io: &mut impl Io, bash_timeout: Duration) -> Result<String> {
-    // ponytail: each command runs in a fresh shell; keep a persistent shell if state across calls matters.
-    let Some(command) = call.function.arguments["command"].as_str() else {
-        return Ok("error: missing `command` in bash tool input".to_owned());
-    };
-    if !io.confirm(command).await? {
-        return Ok("error: the user denied this command".to_owned());
-    }
-    let (output, is_error) = execute(command, bash_timeout).await;
-    io.ran(&output, !is_error).await?;
-    Ok(if is_error {
-        format!("error:\n{output}")
-    } else {
-        output
-    })
-}
-
-async fn execute(command: &str, timeout: Duration) -> (String, bool) {
-    let child = Command::new("bash")
-        .arg("-c")
-        .arg(command)
-        .kill_on_drop(true)
-        .output();
-    match tokio::time::timeout(timeout, child).await {
-        Err(_) => (format!("command timed out after {timeout:?}"), true),
-        Ok(Err(err)) => (format!("failed to start bash: {err}"), true),
-        Ok(Ok(output)) => {
-            let mut text = String::from_utf8_lossy(&output.stdout).into_owned();
-            text.push_str(&String::from_utf8_lossy(&output.stderr));
-            if !output.status.success() {
-                text.push_str(&format!("\n[exit status: {}]", output.status));
-            }
-            (truncate(text), !output.status.success())
-        }
-    }
-}
-
-fn truncate(mut text: String) -> String {
-    if let Some((cut, _)) = text.char_indices().nth(MAX_OUTPUT_CHARS) {
-        text.truncate(cut);
-        text.push_str("\n[output truncated]");
-    }
-    text
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn truncate_keeps_short_output_and_cuts_long_output() {
-        assert_eq!(truncate("ok".to_owned()), "ok");
-        let long = "é".repeat(MAX_OUTPUT_CHARS + 5);
-        let cut = truncate(long);
-        assert!(cut.ends_with("[output truncated]"));
-        assert_eq!(cut.chars().filter(|c| *c == 'é').count(), MAX_OUTPUT_CHARS);
-    }
 
     #[test]
     fn pretty_name_reads_os_release() {
@@ -655,10 +624,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn execute_reports_failure_and_captures_stderr() {
-        let (out, is_error) =
-            execute("echo hi; echo oops >&2; exit 3", Duration::from_secs(5)).await;
-        assert!(is_error);
-        assert!(out.contains("hi") && out.contains("oops"));
+    async fn now_reports_the_date() {
+        let text = now().await;
+        assert!(text.starts_with("20") && text.contains("UTC"), "{text}");
     }
 }

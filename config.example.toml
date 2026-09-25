@@ -18,9 +18,6 @@ api_key = "your-opencode-api-key"
 # Optional. ".../messages" is appended.
 # base_url = "https://opencode.ai/zen/go/v1"
 
-[tools.bash]
-timeout_secs = 120
-
 # Optional. Enables the `web_search` tool through your SearXNG instance.
 # Its settings.yml must list `json` under search.formats, or searches get HTTP 403.
 # [tools.searxng]
@@ -42,7 +39,7 @@ level = "warn"
 # Optional. Needed for `mitten serve`: chat with Mitten by DM to your Discord bot.
 # [discord]
 # token = "your-bot-token"
-# # Only these Discord user IDs can talk to the bot (it can run commands on this machine).
+# # Only these Discord user IDs can talk to the bot (it can read files on this machine).
 # allowed_users = [123456789012345678]
 # # The bot answers these users in DMs and in every server channel it can read, no @mention needed.
 # # Enable the MESSAGE CONTENT intent for the bot in the Developer Portal, or it cannot connect.

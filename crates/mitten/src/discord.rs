@@ -1,6 +1,6 @@
 //! Discord gateway: one agent per DM or thread. A message in a server text channel opens a new
 //! thread for its conversation; threads share their parent channel's memory. Only allow-listed
-//! users are heard, and they approve commands with buttons.
+//! users are heard, and they approve settings changes with buttons.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -125,7 +125,7 @@ impl Handler {
         };
         if !self.allowed_users.contains(&click.user.id.get()) {
             let reply = CreateInteractionResponseMessage::new()
-                .content("You are not allowed to approve commands.")
+                .content("You are not allowed to approve changes.")
                 .ephemeral(true);
             return Ok(click
                 .create_response(&ctx.http, CreateInteractionResponse::Message(reply))
@@ -399,7 +399,7 @@ impl Io for DiscordIo {
     }
 
     async fn confirm(&mut self, command: &str) -> Result<bool> {
-        let block = code_block("sh", command, MAX_MESSAGE_CHARS / 2);
+        let block = code_block("", command, MAX_MESSAGE_CHARS / 2);
         let buttons = CreateActionRow::Buttons(vec![
             CreateButton::new(RUN)
                 .label("Run")
