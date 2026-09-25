@@ -1,5 +1,6 @@
-//! TOML config file: OpenCode Go model and key, tools, logging, storage, and Discord.
+//! TOML config file: OpenCode Go model and key, tools, MCP servers, logging, storage, and Discord.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
@@ -58,6 +59,10 @@ struct File {
     opencode_go: OpenCodeGoSection,
     #[serde(default)]
     tools: ToolsSection,
+    #[serde(default)]
+    mcp: McpSection,
+    #[serde(default)]
+    approval: ApprovalSection,
     #[serde(default)]
     log: LogSection,
     discord: Option<DiscordSection>,
@@ -148,6 +153,88 @@ pub struct Searxng {
     pub results: usize,
 }
 
+/// `[approval]`: who approves MCP calls and settings changes.
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ApprovalSection {
+    #[serde(default)]
+    mode: ApprovalMode,
+    /// Reviewer model for `auto`; defaults to `model.name`.
+    model: Option<String>,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum ApprovalMode {
+    #[default]
+    Ask,
+    Auto,
+}
+
+/// How actions that need approval are approved.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Approval {
+    /// Ask the user every time.
+    Ask,
+    /// A reviewer model passes low-risk actions; anything else is put to the user.
+    Auto { model: String },
+}
+
+/// `[mcp.servers.<name>]`: MCP servers whose tools the model can call.
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct McpSection {
+    #[serde(default)]
+    servers: BTreeMap<String, McpServer>,
+}
+
+/// One MCP server: a local program over stdio (`command`) or a remote one over HTTP (`url`).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct McpServer {
+    pub command: Option<String>,
+    #[serde(default)]
+    pub args: Vec<String>,
+    /// Extra environment for `command`, often API tokens.
+    #[serde(default)]
+    pub env: BTreeMap<String, Secret>,
+    pub url: Option<String>,
+    /// Sent as `Authorization: Bearer <token>` to `url`.
+    pub token: Option<Secret>,
+    /// Ask the user before each call. Default true; turn off only for servers that can't change anything.
+    #[serde(default = "McpServer::default_approve")]
+    pub approve: bool,
+}
+
+impl McpServer {
+    fn default_approve() -> bool {
+        true
+    }
+
+    fn validate(&self, name: &str) -> Result<()> {
+        // Tool names sent to the model are `<server>__<tool>`, limited to these characters.
+        if name.is_empty()
+            || !name
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+        {
+            bail!("mcp.servers.{name}: names may use only letters, digits, _ and -");
+        }
+        match (&self.command, &self.url) {
+            (Some(_), None) => {}
+            (None, Some(url)) if url.starts_with("http://") || url.starts_with("https://") => {}
+            (None, Some(_)) => bail!("mcp.servers.{name}.url must start with http:// or https://"),
+            _ => bail!("mcp.servers.{name} needs exactly one of `command` or `url`"),
+        }
+        if self.command.is_some() && self.token.is_some() {
+            bail!(
+                "mcp.servers.{name}.token is for `url` servers; pass tokens to `command` in `env`"
+            );
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct LogSection {
@@ -191,6 +278,9 @@ pub struct Config {
     pub base_url: String,
     /// Enables the `web_search` tool when set.
     pub searxng: Option<Searxng>,
+    /// MCP servers by name.
+    pub mcp: BTreeMap<String, McpServer>,
+    pub approval: Approval,
     /// `tracing` filter directive, e.g. `warn` or `mitten=debug`.
     pub log_level: String,
     pub discord: Option<DiscordSection>,
@@ -242,8 +332,18 @@ impl Config {
         if compact_at_tokens < 10_000 {
             bail!("model.compact_at_tokens must be at least 10000");
         }
+        for (name, server) in &file.mcp.servers {
+            server.validate(name)?;
+        }
         let model = file.model.name.unwrap_or_else(|| DEFAULT_MODEL.to_owned());
+        let approval = match file.approval.mode {
+            ApprovalMode::Ask => Approval::Ask,
+            ApprovalMode::Auto => Approval::Auto {
+                model: file.approval.model.unwrap_or_else(|| model.clone()),
+            },
+        };
         Ok(Self {
+            approval,
             api: file.model.api.unwrap_or_else(|| Api::for_model(&model)),
             model,
             max_tokens: file.model.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS),
@@ -255,6 +355,7 @@ impl Config {
                 .searxng
                 .map(SearxngSection::validate)
                 .transpose()?,
+            mcp: file.mcp.servers,
             log_level: file.log.level,
             discord: file.discord,
             database_path,
@@ -299,6 +400,46 @@ mod tests {
         let config = Config::parse(include_str!("../../../config.example.toml")).expect("valid");
         assert_eq!(config.base_url, "https://opencode.ai/zen/go/v1");
         assert_eq!(config.api, Api::Anthropic);
+    }
+
+    #[test]
+    fn mcp_servers_parse_and_bad_ones_are_refused() {
+        let base = "[opencode-go]\napi_key = \"k\"\n";
+        let config = Config::parse(&format!(
+            "{base}[mcp.servers.fs]\ncommand = \"npx\"\nargs = [\"-y\", \"x\"]\n\
+             [mcp.servers.remote]\nurl = \"https://e.com/mcp\"\ntoken = \"t\"\napprove = false\n"
+        ))
+        .expect("valid");
+        assert!(config.mcp["fs"].approve);
+        assert!(!config.mcp["remote"].approve);
+        for bad in [
+            "[mcp.servers.fs]\n",
+            "[mcp.servers.fs]\ncommand = \"x\"\nurl = \"https://e.com\"\n",
+            "[mcp.servers.fs]\nurl = \"ftp://e.com\"\n",
+            "[mcp.servers.\"a b\"]\ncommand = \"x\"\n",
+        ] {
+            assert!(Config::parse(&format!("{base}{bad}")).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn approval_defaults_to_ask_and_auto_reviewer_defaults_to_main_model() {
+        let base = "[opencode-go]\napi_key = \"k\"\n[model]\nname = \"glm-5.3\"\n";
+        assert_eq!(Config::parse(base).expect("valid").approval, Approval::Ask);
+        let auto = Config::parse(&format!("{base}[approval]\nmode = \"auto\"\n")).expect("valid");
+        assert_eq!(
+            auto.approval,
+            Approval::Auto {
+                model: "glm-5.3".to_owned()
+            }
+        );
+        let picked = format!("{base}[approval]\nmode = \"auto\"\nmodel = \"kimi-k3\"\n");
+        assert_eq!(
+            Config::parse(&picked).expect("valid").approval,
+            Approval::Auto {
+                model: "kimi-k3".to_owned()
+            }
+        );
     }
 
     #[test]

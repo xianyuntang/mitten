@@ -28,6 +28,26 @@ api_key = "your-opencode-api-key"
 # # Optional. Results per search, 1-20. Default 5.
 # results = 5
 
+# Optional. MCP servers whose tools the model can call, named `<server>__<tool>`.
+# Every call asks you first; set `approve = false` only for servers that can't change anything.
+# A local server over stdio:
+# [mcp.servers.github]
+# command = "npx"
+# args = ["-y", "@modelcontextprotocol/server-github"]
+# env = { GITHUB_PERSONAL_ACCESS_TOKEN = "ghp_..." }
+# A remote server over streamable HTTP, with an optional bearer token:
+# [mcp.servers.docs]
+# url = "https://example.com/mcp"
+# token = "secret"
+# approve = false
+
+# Optional. How MCP calls and settings changes get approved. "ask" (default) asks you every time;
+# "auto" lets a reviewer model pass low-risk actions and asks you about the rest.
+# [approval]
+# mode = "auto"
+# # Optional. Reviewer model; defaults to model.name. A small fast one is enough.
+# model = "glm-5.3-flash"
+
 [log]
 # tracing filter, e.g. "warn", "info", "mitten=debug".
 level = "warn"

@@ -143,7 +143,7 @@ Description=Mitten agent (Discord)
 [Service]
 ExecStart={exe} serve --config {config}
 WorkingDirectory=~
-# The user manager's default PATH lacks cargo and ~/.local/bin, which the headless Chrome lookup may need.
+# The user manager's default PATH lacks cargo and ~/.local/bin, which MCP servers (npx, uvx) and the headless Chrome lookup need.
 Environment="PATH={home}/.cargo/bin:{home}/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 Restart=always
 RestartSec=30
@@ -191,7 +191,7 @@ fn render_plist(exe: &Path, config: &Path, home: &Path, log: &Path) -> String {
     <key>WorkingDirectory</key><string>{home}</string>
     <key>EnvironmentVariables</key>
     <dict>
-        <!-- launchd's default PATH lacks Homebrew and cargo, which the headless Chrome lookup may need. -->
+        <!-- launchd's default PATH lacks Homebrew and cargo, which MCP servers (npx, uvx) and the headless Chrome lookup need. -->
         <key>PATH</key><string>{home}/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
     </dict>
     <key>RunAtLoad</key><true/>

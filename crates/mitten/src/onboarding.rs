@@ -14,6 +14,7 @@ use tokio::runtime::Handle;
 
 use crate::agent;
 use crate::config::{self, Config};
+use toml_edit::{Array, DocumentMut, InlineTable, Item, Table};
 
 /// Common OpenCode Go models; `config::Api::for_model` picks each one's endpoint format.
 pub const MODELS: &[&str] = &[
@@ -31,7 +32,16 @@ pub const MODELS: &[&str] = &[
 const CUSTOM: &str = "Custom…";
 const ENABLED: &str = "Enabled";
 const DISABLED: &str = "Disabled";
-const STEPS: [&str; 4] = ["Model", "Discord", "Web search", "Advanced"];
+const STEPS: [&str; 5] = ["Model", "Discord", "Web search", "MCP", "Advanced"];
+const NO: &str = "No";
+const STDIO: &str = "Local command (stdio)";
+const HTTP: &str = "Remote URL (HTTP)";
+const KEEP: &str = "Keep";
+const REMOVE: &str = "Remove";
+const ASK: &str = "Ask every call";
+const ASK_ME: &str = "Ask me every time";
+const AUTO: &str = "Auto (LLM review)";
+const NEVER_ASK: &str = "Never ask";
 const PING_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Shows the setup, tests the connection, and saves the config to `path`.
@@ -65,7 +75,7 @@ enum Kind {
 
 struct Field {
     step: usize,
-    label: &'static str,
+    label: String,
     kind: Kind,
     value: String,
 }
@@ -84,8 +94,19 @@ const SEARCH_USER: usize = 9;
 const SEARCH_PASSWORD: usize = 10;
 const LOG: usize = 11;
 const DATABASE: usize = 12;
+const MCP_ADD: usize = 13;
+const MCP_NAME: usize = 14;
+const MCP_COMMAND: usize = 15;
+const MCP_ARGS: usize = 16;
+const MCP_ENV: usize = 17;
+const MCP_URL: usize = 18;
+const MCP_TOKEN: usize = 19;
+const MCP_APPROVE: usize = 20;
+const APPROVAL: usize = 21;
+/// First of the rows for already configured MCP servers.
+const MCP_FIRST: usize = 22;
 
-/// Focus value for the Next / Save button under the fields.
+/// Focus value for the Save button under the fields.
 const BUTTON: usize = usize::MAX;
 
 struct Form {
@@ -100,6 +121,10 @@ struct Form {
     force_save: bool,
     /// `tools.searxng.results`, not on the form; kept so saving doesn't reset a hand-edited value.
     search_results: usize,
+    /// Configured MCP servers, one Keep / Remove row each from `MCP_FIRST` on.
+    mcp_names: Vec<String>,
+    /// `approval.model`, not on the form; kept so saving doesn't reset a hand-edited reviewer.
+    review_model: Option<String>,
 }
 
 fn options(values: &[&str]) -> Vec<String> {
@@ -127,16 +152,16 @@ impl Form {
             Some(c) => c.database_path.clone(),
             None => default_database_path()?,
         };
-        let field = |step, label, kind, value: String| Field {
+        let field = |step, label: &str, kind, value: String| Field {
             step,
-            label,
+            label: label.to_owned(),
             kind,
             value,
         };
 
         let mut model_options = options(MODELS);
         model_options.push(CUSTOM.to_owned());
-        let fields = vec![
+        let mut fields = vec![
             field(
                 0,
                 "Provider",
@@ -224,18 +249,54 @@ impl Form {
                     .unwrap_or_default(),
             ),
             field(
-                3,
+                4,
                 "Log level",
                 Kind::Select(options_with(&["error", "warn", "info", "debug"], log)),
                 log.to_owned(),
             ),
             field(
-                3,
+                4,
                 "Database",
                 Kind::Text,
                 database.to_string_lossy().into_owned(),
             ),
+            field(
+                3,
+                "Add server",
+                Kind::Select(options(&[NO, STDIO, HTTP])),
+                NO.to_owned(),
+            ),
+            field(3, "Name", Kind::Text, String::new()),
+            field(3, "Command", Kind::Text, String::new()),
+            field(3, "Arguments", Kind::Text, String::new()),
+            field(3, "Env (K=V, …)", Kind::Secret, String::new()),
+            field(3, "URL", Kind::Text, String::new()),
+            field(3, "Token", Kind::Secret, String::new()),
+            field(
+                3,
+                "Approval",
+                Kind::Select(options(&[ASK, NEVER_ASK])),
+                ASK.to_owned(),
+            ),
         ];
+        let auto = current.is_some_and(|c| matches!(c.approval, config::Approval::Auto { .. }));
+        fields.push(field(
+            4,
+            "Approval",
+            Kind::Select(options(&[ASK_ME, AUTO])),
+            if auto { AUTO } else { ASK_ME }.to_owned(),
+        ));
+        let mcp_names: Vec<String> = current
+            .map(|c| c.mcp.keys().cloned().collect())
+            .unwrap_or_default();
+        fields.extend(mcp_names.iter().map(|name| {
+            field(
+                3,
+                name,
+                Kind::Select(options(&[KEEP, REMOVE])),
+                KEEP.to_owned(),
+            )
+        }));
         Ok(Self {
             fields,
             step: 0,
@@ -245,6 +306,11 @@ impl Form {
             status: Line::default(),
             force_save: false,
             search_results: searxng.map_or(5, |s| s.results),
+            review_model: current.and_then(|c| match &c.approval {
+                config::Approval::Auto { model } if *model != c.model => Some(model.clone()),
+                _ => None,
+            }),
+            mcp_names,
         })
     }
 
@@ -255,6 +321,9 @@ impl Form {
                 CUSTOM_MODEL => self.fields[MODEL].value == CUSTOM,
                 TOKEN | USERS => self.fields[DISCORD].value == ENABLED,
                 SEARCH_URL | SEARCH_USER | SEARCH_PASSWORD => self.fields[SEARCH].value == ENABLED,
+                MCP_NAME | MCP_APPROVE => self.fields[MCP_ADD].value != NO,
+                MCP_COMMAND | MCP_ARGS | MCP_ENV => self.fields[MCP_ADD].value == STDIO,
+                MCP_URL | MCP_TOKEN => self.fields[MCP_ADD].value == HTTP,
                 _ => true,
             }
     }
@@ -329,17 +398,16 @@ impl Form {
             match key.code {
                 KeyCode::Esc if self.step == 0 => return Ok(None),
                 KeyCode::Esc => self.go_to_step(self.step - 1),
+                // Steps are checked together on save, so any step can be visited in any order.
+                KeyCode::Left if self.step > 0 => self.go_to_step(self.step - 1),
+                KeyCode::Right if self.step + 1 < STEPS.len() => self.go_to_step(self.step + 1),
                 KeyCode::Up | KeyCode::BackTab => self.move_focus(-1),
                 KeyCode::Down | KeyCode::Tab => self.move_focus(1),
                 KeyCode::Char('r') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                     self.reveal = !self.reveal;
                 }
                 KeyCode::Enter if self.focus == BUTTON => {
-                    if let Err(err) = self.check_step() {
-                        self.status = Line::from(format!("✗ {err}")).red();
-                    } else if self.step + 1 < STEPS.len() {
-                        self.go_to_step(self.step + 1);
-                    } else if let Some(config) = self.save(terminal, handle, path)? {
+                    if let Some(config) = self.save(terminal, handle, path)? {
                         return Ok(Some(config));
                     }
                 }
@@ -377,6 +445,14 @@ impl Form {
         handle: &Handle,
         path: &Path,
     ) -> Result<Option<Config>> {
+        // Steps can be skipped with ←→, so check them all and show the first one with a problem.
+        if let Some((step, err)) =
+            (0..STEPS.len()).find_map(|step| self.check_step(step).err().map(|err| (step, err)))
+        {
+            self.go_to_step(step);
+            self.status = Line::from(format!("✗ {err}")).red();
+            return Ok(None);
+        }
         let answers = match self.answers() {
             Ok(answers) => answers,
             Err(err) => {
@@ -384,7 +460,15 @@ impl Form {
                 return Ok(None);
             }
         };
-        let text = render_toml(&answers);
+        let (remove, add) = match self.mcp() {
+            Ok(changes) => changes,
+            Err(err) => {
+                self.status = Line::from(format!("✗ {err}")).red();
+                return Ok(None);
+            }
+        };
+        let old = std::fs::read_to_string(path).ok();
+        let text = merge_mcp(&render_toml(&answers), old.as_deref(), &remove, add);
         let config = Config::parse(&text).context("form produced an invalid config")?;
 
         if !self.force_save {
@@ -417,9 +501,9 @@ impl Form {
         Ok(value)
     }
 
-    /// Validates the fields of the current step only.
-    fn check_step(&self) -> std::result::Result<(), String> {
-        match self.step {
+    /// Validates the fields of `step` only.
+    fn check_step(&self, step: usize) -> std::result::Result<(), String> {
+        match step {
             0 => {
                 self.required(KEY)?;
                 self.model()?;
@@ -429,6 +513,9 @@ impl Form {
             }
             2 => {
                 self.search()?;
+            }
+            3 => {
+                self.mcp()?;
             }
             _ => {
                 self.required(DATABASE)?;
@@ -475,6 +562,66 @@ impl Form {
         }))
     }
 
+    /// MCP servers to remove, and the one to add as `(name, table)`.
+    fn mcp(&self) -> std::result::Result<McpChanges, String> {
+        let remove: Vec<String> = self
+            .mcp_names
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| self.fields[MCP_FIRST + i].value == REMOVE)
+            .map(|(_, name)| name.clone())
+            .collect();
+        let kind = self.fields[MCP_ADD].value.as_str();
+        if kind == NO {
+            return Ok((remove, None));
+        }
+        let name = self.required(MCP_NAME)?;
+        if !name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+        {
+            return Err("server Name may use only letters, digits, _ and -".to_owned());
+        }
+        if self.mcp_names.contains(&name) && !remove.contains(&name) {
+            return Err(format!("`{name}` exists; set it to Remove to replace it"));
+        }
+        let mut table = Table::new();
+        if kind == STDIO {
+            table["command"] = toml_edit::value(self.required(MCP_COMMAND)?);
+            let args: Array = self.value(MCP_ARGS).split_whitespace().collect();
+            if !args.is_empty() {
+                table["args"] = toml_edit::value(args);
+            }
+            let mut env = InlineTable::new();
+            for pair in self.value(MCP_ENV).split(',').map(str::trim) {
+                if pair.is_empty() {
+                    continue;
+                }
+                let Some((key, value)) = pair.split_once('=') else {
+                    return Err("Env entries need KEY=VALUE, separated by commas".to_owned());
+                };
+                env.insert(key.trim(), value.trim().into());
+            }
+            if !env.is_empty() {
+                table["env"] = toml_edit::value(env);
+            }
+        } else {
+            let url = self.required(MCP_URL)?;
+            if !url.starts_with("http://") && !url.starts_with("https://") {
+                return Err("URL must start with http:// or https://".to_owned());
+            }
+            table["url"] = toml_edit::value(url);
+            let token = self.value(MCP_TOKEN);
+            if !token.is_empty() {
+                table["token"] = toml_edit::value(token);
+            }
+        }
+        if self.fields[MCP_APPROVE].value == NEVER_ASK {
+            table["approve"] = toml_edit::value(false);
+        }
+        Ok((remove, Some((name, table))))
+    }
+
     fn answers(&self) -> std::result::Result<Answers, String> {
         Ok(Answers {
             api_key: self.required(KEY)?,
@@ -482,6 +629,7 @@ impl Form {
             discord: self.discord()?,
             search: self.search()?,
             log_level: self.required(LOG)?,
+            auto_approval: (self.fields[APPROVAL].value == AUTO).then(|| self.review_model.clone()),
             database: PathBuf::from(self.required(DATABASE)?),
         })
     }
@@ -516,11 +664,7 @@ impl Form {
         for (row, &i) in rows.iter().enumerate() {
             let focused = i == self.focus;
             if i == BUTTON {
-                let label = if self.step + 1 < STEPS.len() {
-                    "[ Next › ]"
-                } else {
-                    "[ Save ]"
-                };
+                let label = "[ Save ]";
                 lines.push(Line::default());
                 let button = if focused {
                     label.black().on_cyan().bold()
@@ -567,7 +711,7 @@ impl Form {
         let hint = if self.menu.is_some() {
             "↑↓ choose · Enter select · Esc close"
         } else {
-            "↑↓ move · Enter open/next · type to edit · ^R show secrets · Esc back · ^C quit"
+            "←→ step · ↑↓ move · Enter open/next · type to edit · ^R show secrets · Esc back · ^C quit"
         };
         frame.render_widget(Paragraph::new(hint).dark_gray(), help);
 
@@ -645,7 +789,44 @@ struct Answers {
     discord: Option<DiscordAnswers>,
     search: Option<SearchAnswers>,
     log_level: String,
+    /// `Some` for auto approval, holding the reviewer model if it isn't the main one.
+    auto_approval: Option<Option<String>>,
     database: PathBuf,
+}
+
+/// MCP servers to remove, and one to add as `(name, table)`.
+type McpChanges = (Vec<String>, Option<(String, Table)>);
+
+/// `text` with the `[mcp.servers]` from the `old` config file carried over, minus `remove`, plus `add`.
+/// Old entries are copied as written, so their comments and secrets survive.
+fn merge_mcp(
+    text: &str,
+    old: Option<&str>,
+    remove: &[String],
+    add: Option<(String, Table)>,
+) -> String {
+    let Ok(mut new) = text.parse::<DocumentMut>() else {
+        return text.to_owned();
+    };
+    let mut servers = old
+        .and_then(|old| old.parse::<DocumentMut>().ok())
+        .and_then(|old| old.get("mcp")?.get("servers")?.as_table().cloned())
+        .unwrap_or_default();
+    for name in remove {
+        servers.remove(name);
+    }
+    if let Some((name, table)) = add {
+        servers.insert(&name, Item::Table(table));
+    }
+    if servers.is_empty() {
+        return new.to_string();
+    }
+    servers.set_implicit(true);
+    let mut mcp = Table::new();
+    mcp.set_implicit(true);
+    mcp.insert("servers", Item::Table(servers));
+    new["mcp"] = Item::Table(mcp);
+    new.to_string()
 }
 
 /// Quotes and escapes a TOML string.
@@ -673,6 +854,12 @@ fn render_toml(answers: &Answers) -> String {
         log = quote(&answers.log_level),
         db = quote(&answers.database.to_string_lossy()),
     );
+    if let Some(reviewer) = &answers.auto_approval {
+        text.push_str("\n[approval]\nmode = \"auto\"\n");
+        if let Some(model) = reviewer {
+            text.push_str(&format!("model = {}\n", quote(model)));
+        }
+    }
     if let Some(search) = &answers.search {
         text.push_str(&format!(
             "\n[tools.searxng]\nurl = {}\nresults = {}\n",
@@ -707,6 +894,65 @@ mod tests {
     use super::*;
 
     #[test]
+    fn mcp_step_validates_new_server() {
+        let config = Config::parse(
+            "[opencode-go]\napi_key = \"k\"\n[mcp.servers.linear]\nurl = \"https://a.example\"\n",
+        )
+        .expect("valid");
+        let mut form = Form::new(Some(&config)).expect("form");
+        form.fields[MCP_ADD].value = HTTP.to_owned();
+        form.fields[MCP_NAME].value = "linear".to_owned();
+        form.fields[MCP_URL].value = "https://mcp.linear.app/mcp".to_owned();
+        assert!(
+            form.mcp().is_err(),
+            "existing name is refused unless removed"
+        );
+        form.fields[MCP_FIRST].value = REMOVE.to_owned();
+        let (remove, add) = form.mcp().expect("replaces it");
+        assert_eq!(remove, ["linear"]);
+        assert_eq!(add.expect("added").0, "linear");
+
+        form.fields[MCP_ADD].value = STDIO.to_owned();
+        form.fields[MCP_NAME].value = "gh".to_owned();
+        form.fields[MCP_COMMAND].value = "npx".to_owned();
+        form.fields[MCP_ARGS].value = "-y  server-github".to_owned();
+        form.fields[MCP_ENV].value = "TOKEN=abc, MODE=ro".to_owned();
+        let (_, add) = form.mcp().expect("valid");
+        let merged = merge_mcp("[opencode-go]\napi_key = \"k\"\n", None, &[], add);
+        let gh = &Config::parse(&merged).expect("valid").mcp["gh"];
+        assert_eq!(gh.args, ["-y", "server-github"]);
+        assert_eq!(gh.env["MODE"].as_str(), "ro");
+        form.fields[MCP_ENV].value = "oops".to_owned();
+        assert!(form.mcp().is_err());
+    }
+
+    #[test]
+    fn merge_mcp_keeps_removes_and_adds_servers() {
+        let new = "[opencode-go]\napi_key = \"k\"\n";
+        let old = "[opencode-go]\napi_key = \"old\"\n\n\
+                   [mcp.servers.fs]\ncommand = \"npx\"\n\n\
+                   [mcp.servers.gone]\nurl = \"https://gone.example\"\n";
+        let mut linear = Table::new();
+        linear["url"] = toml_edit::value("https://mcp.linear.app/mcp");
+        linear["token"] = toml_edit::value("lin_api_x");
+        let merged = merge_mcp(
+            new,
+            Some(old),
+            &["gone".to_owned()],
+            Some(("linear".to_owned(), linear)),
+        );
+        let config = Config::parse(&merged).expect("valid");
+        assert_eq!(config.api_key.as_str(), "k");
+        assert_eq!(config.mcp["fs"].command.as_deref(), Some("npx"));
+        assert!(!config.mcp.contains_key("gone"));
+        assert_eq!(
+            config.mcp["linear"].token.as_ref().map(|t| t.as_str()),
+            Some("lin_api_x")
+        );
+        assert_eq!(merge_mcp(new, None, &[], None), new);
+    }
+
+    #[test]
     fn rendered_config_parses_back() {
         let text = render_toml(&Answers {
             model: "qwen3.8-max".to_owned(),
@@ -721,10 +967,17 @@ mod tests {
                 results: 8,
             }),
             log_level: "info".to_owned(),
+            auto_approval: Some(Some("glm-5.3-flash".to_owned())),
             database: PathBuf::from("/tmp/m.db"),
         });
         let config = Config::parse(&text).expect("valid");
         assert_eq!(config.model, "qwen3.8-max");
+        assert_eq!(
+            config.approval,
+            config::Approval::Auto {
+                model: "glm-5.3-flash".to_owned()
+            }
+        );
         assert_eq!(config.api_key.as_str(), "sk-\"quoted\"");
         assert_eq!(config.discord.map(|d| d.allowed_users), Some(vec![1, 22]));
         let searxng = config.searxng.expect("search section");
@@ -738,16 +991,19 @@ mod tests {
     fn steps_validate_and_hide_conditional_fields() {
         let mut form = Form::new(None).expect("form");
         assert_eq!(
-            form.check_step().err().as_deref(),
+            form.check_step(form.step).err().as_deref(),
             Some("API key is required")
         );
         form.fields[KEY].value = "k".to_owned();
         assert!(!form.visible().contains(&CUSTOM_MODEL));
         form.fields[MODEL].value = CUSTOM.to_owned();
         assert!(form.visible().contains(&CUSTOM_MODEL));
-        assert!(form.check_step().is_err(), "custom model needs an ID");
+        assert!(
+            form.check_step(form.step).is_err(),
+            "custom model needs an ID"
+        );
         form.fields[CUSTOM_MODEL].value = "qwen-next".to_owned();
-        form.check_step().expect("step 1 valid");
+        form.check_step(form.step).expect("step 1 valid");
 
         form.step = 1;
         assert!(!form.visible().contains(&TOKEN));
@@ -755,7 +1011,7 @@ mod tests {
         assert!(form.visible().contains(&TOKEN));
         form.fields[TOKEN].value = "t".to_owned();
         form.fields[USERS].value = "12, x".to_owned();
-        assert!(form.check_step().is_err());
+        assert!(form.check_step(form.step).is_err());
         form.fields[USERS].value = "12, 34".to_owned();
 
         form.step = 2;
@@ -763,12 +1019,15 @@ mod tests {
         form.fields[SEARCH].value = ENABLED.to_owned();
         assert!(form.visible().contains(&SEARCH_PASSWORD));
         form.fields[SEARCH_URL].value = "search.example.com".to_owned();
-        assert!(form.check_step().is_err(), "URL needs a scheme");
+        assert!(form.check_step(form.step).is_err(), "URL needs a scheme");
         form.fields[SEARCH_URL].value = "https://search.example.com".to_owned();
         form.fields[SEARCH_USER].value = "me".to_owned();
-        assert!(form.check_step().is_err(), "username without password");
+        assert!(
+            form.check_step(form.step).is_err(),
+            "username without password"
+        );
         form.fields[SEARCH_PASSWORD].value = "pw".to_owned();
-        form.check_step().expect("search step valid");
+        form.check_step(form.step).expect("search step valid");
 
         let answers = form.answers().expect("all steps valid");
         assert_eq!(answers.model, "qwen-next");

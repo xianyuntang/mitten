@@ -1,5 +1,6 @@
 //! Agent loop over OpenCode Go via Rig's provider clients, with read-only local tools.
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
@@ -20,7 +21,9 @@ use crate::config::{Api, Config};
 use crate::db::Db;
 use crate::fetch::{self, Fetcher};
 use crate::files;
+use crate::mcp::Mcp;
 use crate::memory;
+use crate::review::{self, Guard, Reviewer};
 use crate::search;
 use crate::search::WebSearch;
 use crate::settings;
@@ -103,6 +106,53 @@ impl Model {
     }
 }
 
+/// The reviewer model for auto approval, with the settings to call it.
+#[derive(Debug)]
+struct Review {
+    model: Model,
+    config: Config,
+}
+
+impl Review {
+    /// `None` unless `config` asks for auto approval.
+    fn new(config: &Config, session: &str) -> Result<Option<Arc<Self>>> {
+        let crate::config::Approval::Auto { model } = &config.approval else {
+            return Ok(None);
+        };
+        let config = if *model == config.model {
+            config.clone()
+        } else {
+            Config {
+                model: model.clone(),
+                api: Api::for_model(model),
+                ..config.clone()
+            }
+        };
+        let model = Model::new(&config, session)?;
+        Ok(Some(Arc::new(Self { model, config })))
+    }
+}
+
+impl Reviewer for Review {
+    async fn review(&self, prompt: String) -> Result<String> {
+        let mut request = request(&self.config, review::SYSTEM, &[Message::user(prompt)], &[]);
+        request.tools.clear();
+        let response = self
+            .model
+            .complete(request)
+            .await
+            .context("review request failed")?;
+        Ok(response
+            .choice
+            .iter()
+            .filter_map(|content| match content {
+                AssistantContent::Text(text) => Some(text.text()),
+                _ => None,
+            })
+            .collect())
+    }
+}
+
 impl std::fmt::Debug for Model {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self {
@@ -119,8 +169,9 @@ what's verified, and what's left, never a replay of the process. No filler, no r
 When unsure, say so plainly.
 
 # Tools
-Your tools read; they never change anything on the machine. You cannot run commands. \
-If you say you'll look something up, make the call in the same response.
+Your built-in tools only read; you cannot run commands. Tools named <server>__<tool> come from MCP \
+servers the user connected and may act; the user may be asked to approve those calls, and if one is \
+denied, don't retry it or a variant. If you say you'll do something, make the call in the same response.
 Never answer from memory what a tool can tell you: the time and date (now), file contents \
 (read_file, list_dir). If a task needs a command run or a file changed, say what to run and let the \
 user do it.
@@ -213,7 +264,13 @@ async fn now() -> String {
     }
 }
 
-fn request(config: &Config, system: &str, messages: &[Message]) -> CompletionRequest {
+/// `extra` holds tools beyond the built-in ones, i.e. MCP tools.
+fn request(
+    config: &Config,
+    system: &str,
+    messages: &[Message],
+    extra: &[ToolDefinition],
+) -> CompletionRequest {
     CompletionRequest {
         model: None,
         preamble: None,
@@ -231,6 +288,7 @@ fn request(config: &Config, system: &str, messages: &[Message]) -> CompletionReq
         ]
         .into_iter()
         .chain(config.searxng.is_some().then(search::tool))
+        .chain(extra.iter().cloned())
         .collect(),
         temperature: None,
         max_tokens: Some(u64::from(config.max_tokens)),
@@ -245,6 +303,8 @@ fn request(config: &Config, system: &str, messages: &[Message]) -> CompletionReq
 #[derive(Debug)]
 pub struct Agent {
     model: Model,
+    /// Set when `[approval] mode = "auto"`.
+    reviewer: Option<Arc<Review>>,
     config: Config,
     db: Db,
     conversation_id: i64,
@@ -253,6 +313,8 @@ pub struct Agent {
     /// Set when `[tools.searxng]` is configured.
     search: Option<WebSearch>,
     fetcher: Fetcher,
+    /// Shared by every conversation in the process.
+    mcp: Arc<Mcp>,
     key: String,
     system: String,
     messages: Vec<Message>,
@@ -261,7 +323,13 @@ pub struct Agent {
 impl Agent {
     /// Resumes the stored conversation named `key` (e.g. `terminal`, `discord:<channel>`),
     /// with the memory of the conversation named `memory_key` (usually `key` itself).
-    pub async fn new(config: Config, db: Db, key: &str, memory_key: &str) -> Result<Self> {
+    pub async fn new(
+        config: Config,
+        db: Db,
+        mcp: Arc<Mcp>,
+        key: &str,
+        memory_key: &str,
+    ) -> Result<Self> {
         let conversation = db.conversation(key).await?;
         let memory_id = db.conversation(memory_key).await?.id;
         let messages = db
@@ -275,12 +343,14 @@ impl Agent {
         let search = config.searxng.clone().map(WebSearch::new).transpose()?;
         Ok(Self {
             model: Model::new(&config, &format!("mitten-{}", conversation.id))?,
+            reviewer: Review::new(&config, &format!("mitten-{}-review", conversation.id))?,
             config,
             db,
             conversation_id: conversation.id,
             memory_id,
             search,
             fetcher: Fetcher::new()?,
+            mcp,
             key: key.to_owned(),
             system,
             messages,
@@ -376,6 +446,12 @@ impl Agent {
         {
             self.model = Model::new(&fresh, &format!("mitten-{}", self.conversation_id))?;
         }
+        let endpoint_changed =
+            fresh.base_url != old.base_url || fresh.api_key.as_str() != old.api_key.as_str();
+        if fresh.approval != old.approval || endpoint_changed {
+            self.reviewer =
+                Review::new(&fresh, &format!("mitten-{}-review", self.conversation_id))?;
+        }
         let searxng = self.config.searxng.take();
         self.config = Config { searxng, ..fresh };
         Ok(())
@@ -411,7 +487,13 @@ impl Agent {
         self.reload()?;
         self.compact_if_needed(prompt, io).await?;
         let turn_start = self.messages.len();
-        let result = self.drive(prompt, images, io).await;
+        let result = match self.reviewer.clone() {
+            Some(reviewer) => {
+                let mut io = Guard::new(io, reviewer.as_ref(), prompt);
+                self.drive(prompt, images, &mut io).await
+            }
+            None => self.drive(prompt, images, io).await,
+        };
         if let Err(err) = &result {
             let kept = completed_rounds_end(&self.messages, turn_start);
             self.messages.truncate(kept);
@@ -448,6 +530,7 @@ impl Agent {
             &self.config,
             compact::SYSTEM,
             &[Message::user(compact::transcript(&self.messages[..cut]))],
+            &[],
         );
         request.tools.clear();
         let summary = match self.model.complete(request).await {
@@ -506,7 +589,12 @@ impl Agent {
         loop {
             let response = self
                 .model
-                .complete(request(&self.config, &self.system, &self.messages))
+                .complete(request(
+                    &self.config,
+                    &self.system,
+                    &self.messages,
+                    self.mcp.tools(),
+                ))
                 .await
                 .context("model request failed")?;
             match response.finish_reason() {
@@ -568,7 +656,10 @@ impl Agent {
                     "web_search" if self.search.is_some() => {
                         self.web_search(&call.function.arguments, io).await?
                     }
-                    other => format!("error: unknown tool `{other}`"),
+                    other => match self.mcp.call(other, &call.function.arguments, io).await {
+                        Some(output) => output?,
+                        None => format!("error: unknown tool `{other}`"),
+                    },
                 };
                 results.push(UserContent::tool_result_for(
                     call.id.clone(),
@@ -588,7 +679,12 @@ pub async fn ping(config: &Config) -> Result<String> {
     let model = Model::new(config, "mitten-ping")?;
     let messages = [Message::user("Reply with the single word OK.")];
     let response = model
-        .complete(request(config, "You are a connectivity check.", &messages))
+        .complete(request(
+            config,
+            "You are a connectivity check.",
+            &messages,
+            &[],
+        ))
         .await?;
     Ok(response
         .choice
@@ -621,6 +717,44 @@ mod tests {
         messages.push(Message::user("tool results"));
         messages.push(Message::assistant("calling bash again"));
         assert_eq!(completed_rounds_end(&messages, 2), 5);
+    }
+
+    /// Calls the real model from `~/.config/mitten/config.toml`: `cargo test -- --ignored reviewer`.
+    #[tokio::test]
+    #[ignore = "sends two requests to the configured model"]
+    async fn reviewer_passes_reads_and_flags_deletes() {
+        let path = std::env::home_dir()
+            .expect("home")
+            .join(".config/mitten/config.toml");
+        let loaded = Config::load(&path).expect("config loads");
+        let config = Config {
+            approval: crate::config::Approval::Auto {
+                model: loaded.model.clone(),
+            },
+            ..loaded
+        };
+        let reviewer = Review::new(&config, "mitten-review-test")
+            .expect("builds")
+            .expect("auto");
+        let verdict = |request: &str, action: &str| {
+            let prompt = review::prompt(request, action);
+            let reviewer = Arc::clone(&reviewer);
+            async move { review::parse(&reviewer.review(prompt).await.expect("review runs")) }
+        };
+        let read = verdict(
+            "what issues are assigned to me?",
+            "linear → list_issues\n{\"assignee\": \"me\"}",
+        )
+        .await
+        .expect("parses");
+        assert!(!read.risky, "{}", read.reason);
+        let delete = verdict(
+            "what issues are assigned to me?",
+            "linear → delete_project\n{\"id\": \"ENG\"}",
+        )
+        .await
+        .expect("parses");
+        assert!(delete.risky, "{}", delete.reason);
     }
 
     #[tokio::test]

@@ -21,6 +21,7 @@ use tokio::sync::mpsc;
 use crate::agent::{Agent, Io};
 use crate::config::Config;
 use crate::db::Db;
+use crate::mcp::Mcp;
 
 const CONFIRM_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 /// Discord rejects messages over 2000 characters.
@@ -66,7 +67,9 @@ pub async fn serve(config: Config) -> Result<()> {
     let intents = GatewayIntents::DIRECT_MESSAGES
         | GatewayIntents::GUILD_MESSAGES
         | GatewayIntents::MESSAGE_CONTENT;
+    let mcp = Arc::new(Mcp::connect(&config.mcp).await);
     let handler = Handler {
+        mcp,
         config,
         db,
         allowed_users: discord.allowed_users,
@@ -80,6 +83,8 @@ pub async fn serve(config: Config) -> Result<()> {
 }
 
 struct Handler {
+    /// MCP servers, shared by every channel's agent.
+    mcp: Arc<Mcp>,
     config: Config,
     db: Db,
     /// The only people whose messages and clicks the bot acts on, in DMs and in every server channel.
@@ -104,6 +109,7 @@ impl Handler {
             tokio::spawn(run_channel(
                 self.config.clone(),
                 self.db.clone(),
+                Arc::clone(&self.mcp),
                 Arc::clone(http),
                 channel,
                 memory,
@@ -250,6 +256,7 @@ fn thread_name(content: &str) -> String {
 async fn run_channel(
     config: Config,
     db: Db,
+    mcp: Arc<Mcp>,
     http: Arc<Http>,
     channel: ChannelId,
     memory: ChannelId,
@@ -257,7 +264,7 @@ async fn run_channel(
 ) {
     let key = format!("discord:{channel}");
     let memory_key = format!("discord:{memory}");
-    let mut agent = match Agent::new(config, db, &key, &memory_key).await {
+    let mut agent = match Agent::new(config, db, mcp, &key, &memory_key).await {
         Ok(agent) => agent,
         Err(err) => {
             tracing::error!("failed to start agent: {err:#}");
