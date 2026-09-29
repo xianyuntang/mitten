@@ -63,8 +63,9 @@ archive="mitten-$target.tar.gz"
 
 echo "downloading $archive ($version)"
 fetch "$base/$archive" "$tmp/$archive" || fail "download failed: $base/$archive"
-fetch "$base/$archive.sha256" "$tmp/$archive.sha256" || fail "checksum download failed"
-expected="$(cut -d ' ' -f 1 "$tmp/$archive.sha256")"
+fetch "$base/SHA256SUMS" "$tmp/SHA256SUMS" || fail "checksum download failed: $base/SHA256SUMS"
+expected="$(awk -v f="$archive" '$2 == f { print $1 }' "$tmp/SHA256SUMS")"
+[ -n "$expected" ] || fail "no checksum for $archive in SHA256SUMS"
 [ "$(sha256 "$tmp/$archive")" = "$expected" ] || fail "checksum mismatch for $archive"
 
 tar -xzf "$tmp/$archive" -C "$tmp"
