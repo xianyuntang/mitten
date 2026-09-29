@@ -22,7 +22,8 @@ use anyhow::{Context, Result, bail};
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::fmt::writer::BoxMakeWriter;
 
-const USAGE: &str = "usage: mitten [chat|serve|configure|install|uninstall] [--config PATH] [--version]
+const USAGE: &str =
+    "usage: mitten [chat|serve|configure|install|uninstall] [--config PATH] [--version]
 
   chat       talk in this terminal (default)
   configure  interactive setup: API key, model, Discord
