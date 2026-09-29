@@ -7,9 +7,6 @@ servers such as Linear, and hands coding work to Claude Code.
 Mitten's own tools only read. Anything that changes something (an MCP call, a Claude Code task,
 a settings change) asks you first, or goes past a reviewer model in auto mode.
 
-Models come from [OpenCode Go](https://opencode.ai): MiniMax, Qwen, GLM, Kimi, DeepSeek, or any
-other model it serves.
-
 ## Install
 
 macOS (Apple silicon or Intel) and Linux (x86_64 or arm64, glibc 2.35 or newer):
@@ -39,7 +36,7 @@ mitten configure   # full-screen setup; ←/→ switch pages, Save on any page
 mitten             # chat in the terminal
 ```
 
-`mitten configure` asks for your OpenCode Go API key and model, tests the connection, and writes
+`mitten configure` asks for your API key and model, tests the connection, and writes
 `~/.config/mitten/config.toml`. Only the **Model** page is required.
 
 In the terminal chat, `/new` starts a fresh conversation and `/exit` (or Ctrl-C) quits.

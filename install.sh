@@ -44,8 +44,15 @@ fi
 
 if command -v curl >/dev/null 2>&1; then
     fetch() { curl -fsSL "$1" -o "$2"; }
+    # A progress bar for the archive, when there's a terminal to show it on.
+    if [ -t 2 ]; then
+        fetch_big() { curl -fL --progress-bar "$1" -o "$2"; }
+    else
+        fetch_big() { fetch "$1" "$2"; }
+    fi
 elif command -v wget >/dev/null 2>&1; then
     fetch() { wget -q "$1" -O "$2"; }
+    fetch_big() { fetch "$1" "$2"; }
 else
     fail "needs curl or wget"
 fi
@@ -62,7 +69,7 @@ trap 'rm -rf "$tmp"' EXIT
 archive="mitten-$target.tar.gz"
 
 echo "downloading $archive ($version)"
-fetch "$base/$archive" "$tmp/$archive" || fail "download failed: $base/$archive"
+fetch_big "$base/$archive" "$tmp/$archive" || fail "download failed: $base/$archive"
 fetch "$base/SHA256SUMS" "$tmp/SHA256SUMS" || fail "checksum download failed: $base/SHA256SUMS"
 expected="$(awk -v f="$archive" '$2 == f { print $1 }' "$tmp/SHA256SUMS")"
 [ -n "$expected" ] || fail "no checksum for $archive in SHA256SUMS"
