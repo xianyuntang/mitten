@@ -40,7 +40,8 @@ fn launchd_install(exe: &Path, config_path: &Path, home: &Path) -> Result<()> {
     let log = home.join("Library/Logs/mitten.log");
     let plist = plist_path(home);
 
-    let contents = render_plist(exe, config_path, home, &log);
+    let path = service_path(home, std::env::var("PATH").ok().as_deref(), LAUNCHD_PATH);
+    let contents = render_plist(exe, config_path, home, &log, &path);
     if let Some(dir) = plist.parent() {
         std::fs::create_dir_all(dir)
             .with_context(|| format!("failed to create {}", dir.display()))?;
@@ -85,7 +86,8 @@ fn systemd_install(exe: &Path, config_path: &Path, home: &Path) -> Result<()> {
         std::fs::create_dir_all(dir)
             .with_context(|| format!("failed to create {}", dir.display()))?;
     }
-    std::fs::write(&unit, render_unit(exe, config_path, home))
+    let path = service_path(home, std::env::var("PATH").ok().as_deref(), SYSTEMD_PATH);
+    std::fs::write(&unit, render_unit(exe, config_path, &path))
         .with_context(|| format!("failed to write {}", unit.display()))?;
     systemctl(&["daemon-reload"])?;
     systemctl(&["enable", UNIT])?;
@@ -134,8 +136,56 @@ fn run(program: &str, args: &[&str]) -> Result<()> {
     Ok(())
 }
 
-fn render_unit(exe: &Path, config: &Path, home: &Path) -> String {
-    let home = home.to_string_lossy().replace('%', "%%");
+/// Fallback directories on the service PATH; `~` is the home directory.
+const LAUNCHD_PATH: &[&str] = &[
+    "~/.cargo/bin",
+    "~/.local/bin",
+    "/opt/homebrew/bin",
+    "/usr/local/bin",
+    "/usr/bin",
+    "/bin",
+    "/usr/sbin",
+    "/sbin",
+];
+const SYSTEMD_PATH: &[&str] = &[
+    "~/.cargo/bin",
+    "~/.local/bin",
+    "/usr/local/sbin",
+    "/usr/local/bin",
+    "/usr/sbin",
+    "/usr/bin",
+    "/sbin",
+    "/bin",
+];
+
+/// The PATH the service runs with: the installing shell's PATH first, so node, npx, and claude
+/// resolve the same way as in the terminal (whatever manages them: asdf, nvm, Homebrew, …), then
+/// `fallback`. Relative entries are dropped, since the service's working directory differs.
+/// Like Hermes' gateway install, tools set up later need `mitten install` again.
+fn service_path(home: &Path, shell: Option<&str>, fallback: &[&str]) -> String {
+    let fallback = fallback.iter().map(|dir| match dir.strip_prefix("~/") {
+        Some(rest) => home.join(rest).to_string_lossy().into_owned(),
+        None => (*dir).to_owned(),
+    });
+    let mut dirs: Vec<String> = Vec::new();
+    for dir in shell
+        .unwrap_or_default()
+        .split(':')
+        .map(str::to_owned)
+        .chain(fallback)
+    {
+        if Path::new(&dir).is_absolute() && !dirs.contains(&dir) {
+            dirs.push(dir);
+        }
+    }
+    dirs.join(":")
+}
+
+fn render_unit(exe: &Path, config: &Path, path: &str) -> String {
+    let path = path
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('%', "%%");
     format!(
         r#"[Unit]
 Description=Mitten agent (Discord)
@@ -143,8 +193,9 @@ Description=Mitten agent (Discord)
 [Service]
 ExecStart={exe} serve --config {config}
 WorkingDirectory=~
-# The user manager's default PATH lacks cargo and ~/.local/bin, which MCP servers (npx, uvx) and the headless Chrome lookup need.
-Environment="PATH={home}/.cargo/bin:{home}/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+# PATH from the shell that ran `mitten install`, so MCP servers (npx, uvx), claude, and the headless
+# Chrome lookup resolve as in the terminal. Run `mitten install` again after installing new tools.
+Environment="PATH={path}"
 Restart=always
 RestartSec=30
 
@@ -172,9 +223,10 @@ fn path_str(path: &Path) -> Result<&str> {
         .with_context(|| format!("path is not UTF-8: {}", path.display()))
 }
 
-fn render_plist(exe: &Path, config: &Path, home: &Path, log: &Path) -> String {
+fn render_plist(exe: &Path, config: &Path, home: &Path, log: &Path, path: &str) -> String {
     let [exe, config, home, log] =
         [exe, config, home, log].map(|p| xml_escape(&p.to_string_lossy()));
+    let path = xml_escape(path);
     format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -191,8 +243,9 @@ fn render_plist(exe: &Path, config: &Path, home: &Path, log: &Path) -> String {
     <key>WorkingDirectory</key><string>{home}</string>
     <key>EnvironmentVariables</key>
     <dict>
-        <!-- launchd's default PATH lacks Homebrew and cargo, which MCP servers (npx, uvx), claude, and the headless Chrome lookup need. -->
-        <key>PATH</key><string>{home}/.cargo/bin:{home}/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+        <!-- PATH from the shell that ran `mitten install`, so MCP servers (npx, uvx), claude, and the
+             headless Chrome lookup resolve as in the terminal. Reinstall after installing new tools. -->
+        <key>PATH</key><string>{path}</string>
     </dict>
     <key>RunAtLoad</key><true/>
     <key>KeepAlive</key><true/>
@@ -222,14 +275,12 @@ mod tests {
             Path::new("/cfg/a&b.toml"),
             Path::new("/home"),
             Path::new("/log"),
+            "/Users/me/.asdf/shims:/usr/bin",
         );
         assert!(plist.contains("<string>serve</string>"));
         assert!(plist.contains("<string>/cfg/a&amp;b.toml</string>"));
         assert!(plist.contains("<key>KeepAlive</key><true/>"));
-        assert!(
-            plist.contains("/home/.local/bin:"),
-            "claude installs to ~/.local/bin"
-        );
+        assert!(plist.contains("<string>/Users/me/.asdf/shims:/usr/bin</string>"));
     }
 
     #[test]
@@ -237,14 +288,34 @@ mod tests {
         let unit = render_unit(
             Path::new("/opt/my apps/mitten"),
             Path::new("/cfg/100%$x.toml"),
-            Path::new("/home/me"),
+            "/opt/100%/bin:/usr/bin",
         );
         assert!(
             unit.contains(r#"ExecStart="/opt/my apps/mitten" serve --config "/cfg/100%%$$x.toml""#),
             "{unit}"
         );
         assert!(unit.contains("Restart=always"));
-        assert!(unit.contains("/home/me/.cargo/bin:"));
+        assert!(
+            unit.contains(r#"Environment="PATH=/opt/100%%/bin:/usr/bin""#),
+            "{unit}"
+        );
+    }
+
+    #[test]
+    fn service_path_puts_shell_first_then_fallback_without_duplicates() {
+        let path = service_path(
+            Path::new("/home/me"),
+            Some("/home/me/.asdf/shims:.:bin:/usr/bin:/opt/homebrew/bin"),
+            &["~/.local/bin", "/usr/bin"],
+        );
+        assert_eq!(
+            path,
+            "/home/me/.asdf/shims:/usr/bin:/opt/homebrew/bin:/home/me/.local/bin"
+        );
+        assert_eq!(
+            service_path(Path::new("/h"), None, &["~/.local/bin"]),
+            "/h/.local/bin"
+        );
     }
 
     #[cfg(target_os = "macos")]
@@ -256,6 +327,7 @@ mod tests {
             Path::new("/cfg.toml"),
             Path::new("/home"),
             Path::new("/log"),
+            "/usr/bin:/bin",
         );
         let mut child = Command::new("plutil")
             .args(["-lint", "-"])
