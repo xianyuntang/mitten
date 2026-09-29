@@ -1,48 +1,176 @@
 # mitten
 
-A personal agent you chat with in the terminal or over Discord. It runs on your machine with
-models from [OpenCode Go](https://opencode.ai), reads files and the web, remembers what you tell
-it, calls tools on MCP servers, and hands coding work to Claude Code. Anything that changes
-something asks you first, or goes past a reviewer model in auto mode.
+A personal agent that runs on your machine. Chat with it in the terminal or over Discord. It
+reads files and web pages, searches the web, remembers what you tell it, calls tools on MCP
+servers such as Linear, and hands coding work to Claude Code.
+
+Mitten's own tools only read. Anything that changes something (an MCP call, a Claude Code task,
+a settings change) asks you first, or goes past a reviewer model in auto mode.
+
+Models come from [OpenCode Go](https://opencode.ai): MiniMax, Qwen, GLM, Kimi, DeepSeek, or any
+other model it serves.
 
 ## Install
 
-macOS (Apple silicon or Intel) and Linux (x86_64 or arm64, glibc 2.35+):
+macOS (Apple silicon or Intel) and Linux (x86_64 or arm64, glibc 2.35 or newer):
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/xianyuntang/mitten/main/install.sh | sh
 ```
 
-This puts `mitten` in `~/.local/bin`. Set `MITTEN_VERSION=v0.1.0` to pin a release or
-`MITTEN_INSTALL_DIR` to install elsewhere. From source instead:
+The script downloads the release for your platform, checks its SHA-256, and puts `mitten` in
+`~/.local/bin`. Options:
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `MITTEN_VERSION` | latest | Release tag to install, e.g. `v0.1.0` |
+| `MITTEN_INSTALL_DIR` | `~/.local/bin` | Where the binary goes |
+
+Or build from source with Rust 1.88 or newer:
 
 ```sh
 cargo install --git https://github.com/xianyuntang/mitten mitten
 ```
 
-## Set up
+## Quick start
 
 ```sh
-mitten configure   # model and API key, Discord bot, web search, MCP servers, Claude Code
+mitten configure   # full-screen setup; ←/→ switch pages, Save on any page
 mitten             # chat in the terminal
-mitten install     # run the Discord bot in the background (launchd or systemd)
 ```
 
-`mitten install` records your shell's `PATH`, so MCP servers started with `npx` or `uvx` and
-`claude` are found the way your terminal finds them. Run it again after upgrading mitten or
-installing new tools. The config lives at `~/.config/mitten/config.toml`; see
-[`config.example.toml`](config.example.toml) for every option.
+`mitten configure` asks for your OpenCode Go API key and model, tests the connection, and writes
+`~/.config/mitten/config.toml`. Only the **Model** page is required.
 
-## What it can do
+In the terminal chat, `/new` starts a fresh conversation and `/exit` (or Ctrl-C) quits.
+Conversations are saved, so the next `mitten` picks up where you left off.
 
-- **Read-only tools**: files and directories (hidden paths refused), web pages, web search
-  through SearXNG, the current time.
-- **Memory**: notes that carry over into later conversations.
-- **Discord**: one thread per conversation, image and text attachments, button approvals.
-- **MCP**: tools from local (stdio) or remote (HTTP) servers, e.g. Linear.
-- **Claude Code**: delegates coding tasks to `claude -p` in directories you allow.
-- **Approval**: ask every time, or `auto`, where a reviewer model passes low-risk actions and
-  asks you about the rest.
+## Discord
+
+Mitten can answer you in Discord, by DM or in any server channel it can read.
+
+1. Create an application at the [Discord Developer Portal](https://discord.com/developers/applications),
+   add a bot, and copy its token.
+2. Under **Bot**, turn on **Message Content Intent**. Without it the bot cannot connect.
+3. Invite the bot to your server with the permissions **View Channels**, **Send Messages**,
+   **Send Messages in Threads**, **Create Public Threads**, **Read Message History**, and
+   **Add Reactions**.
+4. Find your Discord user ID: turn on **Developer Mode** in Discord's settings, then right-click
+   your name and choose **Copy User ID**.
+5. Run `mitten configure`, open the **Discord** page, and enter the token and your user ID.
+6. Run `mitten install` to keep the bot running in the background.
+
+How it behaves:
+
+- Only the user IDs you list are heard; everyone else is ignored.
+- A message in a server channel opens a thread, and each thread is its own conversation.
+  Threads share the memory of the channel they belong to. Idle threads archive after an hour.
+- 👀 means received, ✅ done, ❌ failed. `/new` starts over in that channel or thread.
+- Images and text files you attach (including the `message.txt` Discord makes from a long
+  paste) go to the model.
+- Approvals show up as **Run** and **Deny** buttons.
+
+## Running in the background
+
+```sh
+mitten install     # launchd on macOS, a systemd user service on Linux
+mitten uninstall
+```
+
+The service runs `mitten serve` and restarts it if it exits. `mitten install` records your
+shell's `PATH`, so `npx`, `uvx`, and `claude` resolve the way they do in your terminal, whether
+they come from Homebrew, asdf, nvm, or elsewhere. Run it again after upgrading mitten or
+installing new tools.
+
+Logs:
+
+- macOS: `~/Library/Logs/mitten.log`
+- Linux: `journalctl --user -u mitten -f`
+- Terminal chat: `~/.local/share/mitten/mitten.log`
+
+## Tools
+
+| Tool | What it does | Needs approval |
+| --- | --- | --- |
+| `read_file`, `list_dir` | Reads files and lists directories. Hidden paths (like `~/.ssh` or `.env`) and Mitten's own config and database are refused. | No |
+| `fetch_url` | Reads a web page as text, optionally rendered in headless Chrome. Private network addresses are refused. | No |
+| `web_search` | Searches through your SearXNG instance. | No |
+| `now` | The local date and time. | No |
+| `memory` | Saves short notes that load into later conversations. | No |
+| `settings` | Reads or changes the model and a few limits. | Yes |
+| MCP tools | Any tool from the MCP servers you connect. | Yes, per server |
+| `claude_code` | Hands a coding task to Claude Code. | Yes |
+
+### MCP servers
+
+Add servers on the **MCP** page of `mitten configure`, or in the config. Their tools reach the
+model as `<server>__<tool>`.
+
+```toml
+# A remote server. Linear accepts a personal API key as the bearer token.
+[mcp.servers.linear]
+url = "https://mcp.linear.app/mcp"
+token = "lin_api_..."
+
+# A local server started with npx.
+[mcp.servers.github]
+command = "npx"
+args = ["-y", "@modelcontextprotocol/server-github"]
+env = { GITHUB_PERSONAL_ACCESS_TOKEN = "ghp_..." }
+approve = true   # the default: ask before each call
+```
+
+Servers connect once at startup and are shared by every conversation. Restart after changing
+them.
+
+### Claude Code
+
+With [Claude Code](https://claude.com/claude-code) installed and logged in, Mitten can delegate
+work that changes code or runs commands. It runs `claude -p` in a directory you allow, shows each
+step as it goes, and reports the result. A later task can resume the same Claude Code session.
+
+```toml
+[tools.claude_code]
+dirs = ["~/repos"]                   # it may only work in these directories
+permission_mode = "acceptEdits"      # or "plan" or "default"; bypassPermissions is refused
+allowed_tools = ["Bash(cargo test:*)", "Bash(git diff:*)"]
+```
+
+## Approval
+
+Every action that needs approval shows you what will run. There are two modes:
+
+- **Ask** (default): you approve each action.
+- **Auto**: a reviewer model reads your request and the proposed action. Reading, and small
+  changes you asked for, go ahead with a 🛡️ note. Anything that deletes, publishes, messages
+  other people, changes permissions, touches many items, or that the reviewer is unsure about is
+  put to you with its reason. A failed review also falls back to asking.
+
+```toml
+[approval]
+mode = "auto"
+model = "glm-5.3-flash"   # optional; defaults to the main model
+```
+
+The model cannot turn on auto mode itself; only `mitten configure` or the config file can.
+
+## Configuration
+
+Everything lives in `~/.config/mitten/config.toml` (or pass `--config PATH`).
+[`config.example.toml`](config.example.toml) documents every option. `mitten configure` keeps
+settings it doesn't show, such as MCP servers you added by hand. Most changes apply from the next
+message; MCP servers, web search, and Discord need a restart.
+
+## Development
+
+```sh
+cargo test                    # unit tests
+cargo test -- --ignored       # also the tests that call real services (npx, your model, claude)
+cargo clippy --all-targets -- -D warnings
+```
+
+Pushing a `v*` tag that matches the version in `crates/mitten/Cargo.toml` builds every platform
+and publishes a GitHub release.
 
 ## License
 
