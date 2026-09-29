@@ -22,7 +22,7 @@ use anyhow::{Context, Result, bail};
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::fmt::writer::BoxMakeWriter;
 
-const USAGE: &str = "usage: mitten [chat|serve|configure|install|uninstall] [--config PATH]
+const USAGE: &str = "usage: mitten [chat|serve|configure|install|uninstall] [--config PATH] [--version]
 
   chat       talk in this terminal (default)
   configure  interactive setup: API key, model, Discord
@@ -42,6 +42,10 @@ async fn main() -> Result<()> {
             }
             Some("-h" | "--help") => {
                 println!("{USAGE}");
+                return Ok(());
+            }
+            Some("-V" | "--version") => {
+                println!("mitten {}", env!("CARGO_PKG_VERSION"));
                 return Ok(());
             }
             Some(name @ ("chat" | "serve" | "configure" | "install" | "uninstall"))
