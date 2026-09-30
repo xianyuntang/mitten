@@ -24,6 +24,10 @@ use crate::db::Db;
 use crate::mcp::Mcp;
 
 const CONFIRM_TIMEOUT: Duration = Duration::from_secs(10 * 60);
+/// How long a turn waits for another message before starting, so a burst is answered once.
+const MERGE_QUIET: Duration = Duration::from_millis(500);
+/// Longest a turn waits to merge, however fast messages keep coming.
+const MERGE_CAP: Duration = Duration::from_secs(1);
 /// Discord rejects messages over 2000 characters.
 const MAX_MESSAGE_CHARS: usize = 1_900;
 /// Reaction added to each message the bot picks up, swapped for `DONE` or `FAILED` once handled.
@@ -279,19 +283,33 @@ async fn run_channel(
         approval: None,
         status: None,
     };
-    while let Some(input) = io.inbox.recv().await {
+    // A `/new` that ended a merged burst, handled next on its own.
+    let mut next = None;
+    loop {
+        let input = match next.take() {
+            Some(input) => input,
+            None => match io.inbox.recv().await {
+                Some(input) => input,
+                None => break,
+            },
+        };
         let Input::Text {
-            content,
-            attachments,
+            mut content,
+            mut attachments,
             origin,
             message,
         } = input
         else {
             continue; // A click on an approval that already timed out.
         };
+        let mut messages = vec![(origin, message)];
+        if content.trim() != "/new" {
+            next =
+                merge_waiting(&mut io.inbox, &mut content, &mut attachments, &mut messages).await;
+        }
         let prompt = content.trim();
         if prompt.is_empty() && attachments.is_empty() {
-            io.finish(origin, message, true).await;
+            io.finish_all(&messages, true).await;
             continue;
         }
         if prompt == "/new" {
@@ -302,7 +320,7 @@ async fn run_channel(
             if let Err(err) = io.say(&reply).await {
                 tracing::error!("failed to reply: {err:#}");
             }
-            io.finish(origin, message, ok).await;
+            io.finish_all(&messages, ok).await;
             continue;
         }
         io.status = None;
@@ -321,7 +339,47 @@ async fn run_channel(
                 tracing::error!("failed to report error: {err:#}");
             }
         }
-        io.finish(origin, message, result.is_ok()).await;
+        io.finish_all(&messages, result.is_ok()).await;
+    }
+}
+
+/// Folds text messages into one prompt until `inbox` stays quiet for `MERGE_QUIET` or `MERGE_CAP`
+/// passes, so a burst,
+/// or messages sent while a turn ran, is answered once. Stops at a `/new`, which is returned to
+/// run after this prompt.
+async fn merge_waiting(
+    inbox: &mut mpsc::UnboundedReceiver<Input>,
+    content: &mut String,
+    attachments: &mut Vec<Attachment>,
+    messages: &mut Vec<(ChannelId, MessageId)>,
+) -> Option<Input> {
+    let cap = tokio::time::Instant::now() + MERGE_CAP;
+    loop {
+        let quiet = tokio::time::Instant::now() + MERGE_QUIET;
+        let Ok(Some(input)) = tokio::time::timeout_at(quiet.min(cap), inbox.recv()).await else {
+            return None;
+        };
+        let Input::Text {
+            content: more,
+            attachments: more_attachments,
+            origin,
+            message,
+        } = input
+        else {
+            continue;
+        };
+        if more.trim() == "/new" {
+            return Some(Input::Text {
+                content: more,
+                attachments: more_attachments,
+                origin,
+                message,
+            });
+        }
+        content.push('\n');
+        content.push_str(&more);
+        attachments.extend(more_attachments);
+        messages.push((origin, message));
     }
 }
 
@@ -360,6 +418,12 @@ impl DiscordIo {
         };
         if let Err(err) = swap.await {
             tracing::warn!("failed to update reaction: {err:#}");
+        }
+    }
+
+    async fn finish_all(&self, messages: &[(ChannelId, MessageId)], ok: bool) {
+        for &(origin, message) in messages {
+            self.finish(origin, message, ok).await;
         }
     }
 
@@ -587,6 +651,63 @@ mod tests {
         assert!(parts.iter().all(|p| p.chars().count() <= MAX_MESSAGE_CHARS));
         assert_eq!(parts.concat(), text);
         assert!(chunks("", MAX_MESSAGE_CHARS).is_empty());
+    }
+
+    #[tokio::test]
+    async fn merge_waiting_joins_burst_and_stops_at_new() {
+        let text = |content: &str, id: u64| Input::Text {
+            content: content.to_owned(),
+            attachments: Vec::new(),
+            origin: ChannelId::new(1),
+            message: MessageId::new(id),
+        };
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        for input in [
+            text("b", 2),
+            Input::Decision {
+                message: MessageId::new(9),
+                run: true,
+            },
+            text("c", 3),
+            text(" /new ", 4),
+            text("d", 5),
+        ] {
+            tx.send(input).unwrap();
+        }
+        drop(tx);
+        let mut content = "a".to_owned();
+        let mut attachments = Vec::new();
+        let mut messages = vec![(ChannelId::new(1), MessageId::new(1))];
+        let next = merge_waiting(&mut rx, &mut content, &mut attachments, &mut messages).await;
+        assert_eq!(content, "a\nb\nc");
+        assert_eq!(messages.len(), 3);
+        assert!(matches!(next, Some(Input::Text { message, .. }) if message == MessageId::new(4)));
+        assert!(matches!(rx.try_recv(), Ok(Input::Text { content, .. }) if content == "d"));
+    }
+
+    #[tokio::test]
+    async fn merge_waiting_stops_at_cap() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        tokio::spawn(async move {
+            for id in 2.. {
+                let input = Input::Text {
+                    content: "more".to_owned(),
+                    attachments: Vec::new(),
+                    origin: ChannelId::new(1),
+                    message: MessageId::new(id),
+                };
+                if tx.send(input).is_err() {
+                    break;
+                }
+                tokio::time::sleep(MERGE_QUIET / 2).await;
+            }
+        });
+        let start = tokio::time::Instant::now();
+        let mut content = String::new();
+        let mut messages = Vec::new();
+        merge_waiting(&mut rx, &mut content, &mut Vec::new(), &mut messages).await;
+        assert!(start.elapsed() < MERGE_CAP + MERGE_QUIET / 2);
+        assert!(messages.len() >= 2);
     }
 
     #[test]

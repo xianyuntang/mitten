@@ -66,6 +66,8 @@ How it behaves:
 - A message in a server channel opens a thread, and each thread is its own conversation.
   Threads share the memory of the channel they belong to. Idle threads archive after an hour.
 - 👀 means received, ✅ done, ❌ failed. `/new` starts over in that channel or thread.
+- Messages sent in quick succession, or while mitten is still answering, are merged and answered
+  once.
 - Images and text files you attach (including the `message.txt` Discord makes from a long
   paste) go to the model.
 - Approvals show up as **Run** and **Deny** buttons.
