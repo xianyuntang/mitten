@@ -80,7 +80,10 @@ impl Model {
                     .http_headers(headers)
                     .build()
                     .context("failed to build Anthropic-format client")?
-                    .completion_model(&config.model),
+                    .completion_model(&config.model)
+                    // Anthropic-format providers only cache what is marked; OpenAI-format ones cache
+                    // the longest shared prefix on their own.
+                    .with_automatic_caching(),
             ),
             Api::Openai => Self::Openai(
                 openai::Client::builder()
@@ -180,15 +183,13 @@ Hidden paths (starting with .) are refused; don't try to get around that.
 If something fails and blocks you, say so and try another route. Never fabricate output.
 When the obvious interpretation is clear, act; ask only when the ambiguity changes what you would run.";
 
-/// Stable text first, per-session details last, so the provider can cache the prefix.
-/// Memory is read once here, so edits show up from the next conversation (or `/new`) on.
+/// Most stable text first and memory last, so the provider can cache the prefix: a memory edit
+/// only changes the tail. Memory is read once here, so edits show up from the next conversation
+/// (or `/new`) on, and the prompt stays byte-identical within one.
 /// Web search and Claude Code guidance are added when those tools are configured.
-async fn system_prompt(db: &Db, memory_id: i64, key: &str, config: &Config) -> Result<String> {
+async fn system_prompt(db: &Db, key: &str, config: &Config) -> Result<String> {
     let cwd = std::env::current_dir().context("failed to read current directory")?;
-    let memories = db
-        .memories(memory_id)
-        .await
-        .context("failed to load memory")?;
+    let memories = db.memories().await.context("failed to load memory")?;
     let mut tools = if config.searxng.is_some() {
         format!("{}\n\n", search::GUIDANCE)
     } else {
@@ -198,7 +199,7 @@ async fn system_prompt(db: &Db, memory_id: i64, key: &str, config: &Config) -> R
         tools.push_str(&format!("{}\n\n", claude_code::guidance(claude_code)));
     }
     Ok(format!(
-        "{IDENTITY}\n\n{tools}{guidance}\n\n{hint}\n\n{saved}\n\nOS: {os}. Working directory: {cwd}.",
+        "{IDENTITY}\n\n{tools}{guidance}\n\nOS: {os}. Working directory: {cwd}.\n\n{hint}\n\n{saved}",
         guidance = memory::GUIDANCE,
         hint = platform_hint(key),
         saved = memory::snapshot(&memories),
@@ -313,8 +314,6 @@ pub struct Agent {
     config: Config,
     db: Db,
     conversation_id: i64,
-    /// Conversation whose memory this one reads and writes; a Discord thread uses its parent channel's.
-    memory_id: i64,
     /// Set when `[tools.searxng]` is configured.
     search: Option<WebSearch>,
     fetcher: Fetcher,
@@ -326,17 +325,9 @@ pub struct Agent {
 }
 
 impl Agent {
-    /// Resumes the stored conversation named `key` (e.g. `terminal`, `discord:<channel>`),
-    /// with the memory of the conversation named `memory_key` (usually `key` itself).
-    pub async fn new(
-        config: Config,
-        db: Db,
-        mcp: Arc<Mcp>,
-        key: &str,
-        memory_key: &str,
-    ) -> Result<Self> {
+    /// Resumes the stored conversation named `key` (e.g. `terminal`, `discord:<channel>`).
+    pub async fn new(config: Config, db: Db, mcp: Arc<Mcp>, key: &str) -> Result<Self> {
         let conversation = db.conversation(key).await?;
-        let memory_id = db.conversation(memory_key).await?.id;
         let messages = db
             .messages(conversation.id)
             .await?
@@ -344,7 +335,7 @@ impl Agent {
             .map(|row| serde_json::from_value(row.content))
             .collect::<Result<Vec<Message>, _>>()
             .context("stored conversation is unreadable; send /new to start over")?;
-        let system = system_prompt(&db, memory_id, key, &config).await?;
+        let system = system_prompt(&db, key, &config).await?;
         let search = config.searxng.clone().map(WebSearch::new).transpose()?;
         Ok(Self {
             model: Model::new(&config, &format!("mitten-{}", conversation.id))?,
@@ -352,7 +343,6 @@ impl Agent {
             config,
             db,
             conversation_id: conversation.id,
-            memory_id,
             search,
             fetcher: Fetcher::new()?,
             mcp,
@@ -368,13 +358,13 @@ impl Agent {
 
     /// Validates and applies one memory tool call; problems go back to the model as text.
     async fn remember(&self, args: &Value, io: &mut impl Io) -> Result<String> {
-        let entries = self.db.memories(self.memory_id).await?;
+        let entries = self.db.memories().await?;
         let (edit, used) = match memory::plan(&entries, args) {
             Ok(planned) => planned,
             Err(problem) => return Ok(format!("error: {problem}")),
         };
         let note = memory::describe(&edit, &entries);
-        self.db.save_memory(self.memory_id, edit).await?;
+        self.db.save_memory(edit).await?;
         io.note(&note).await?;
         Ok(format!(
             "saved; memory uses {used}/{} characters. It loads into the next conversation.",
@@ -578,7 +568,7 @@ impl Agent {
         self.db.clear(self.conversation_id).await?;
         self.messages.clear();
         // A fresh conversation picks up memory saved since the last one started.
-        self.system = system_prompt(&self.db, self.memory_id, &self.key, &self.config).await?;
+        self.system = system_prompt(&self.db, &self.key, &self.config).await?;
         Ok(())
     }
 

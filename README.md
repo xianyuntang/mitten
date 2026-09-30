@@ -64,7 +64,7 @@ How it behaves:
 
 - Only the user IDs you list are heard; everyone else is ignored.
 - A message in a server channel opens a thread, and each thread is its own conversation.
-  Threads share the memory of the channel they belong to. Idle threads archive after an hour.
+  Memory is shared by every conversation, terminal included. Idle threads archive after an hour.
 - 👀 means received, ✅ done, ❌ failed. `/new` starts over in that channel or thread.
 - Messages sent in quick succession, or while mitten is still answering, are merged and answered
   once.

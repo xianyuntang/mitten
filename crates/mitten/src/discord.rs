@@ -1,5 +1,5 @@
 //! Discord gateway: one agent per DM or thread. A message in a server text channel opens a new
-//! thread for its conversation; threads share their parent channel's memory. Only allow-listed
+//! thread for its conversation. Memory is shared by every conversation. Only allow-listed
 //! users are heard, and they approve settings changes with buttons.
 
 use std::collections::HashMap;
@@ -99,8 +99,7 @@ struct Handler {
 
 impl Handler {
     /// Hands `input` to the channel's agent task, starting one for text if none is running.
-    /// `memory` is the channel whose memory a newly started agent uses.
-    fn deliver(&self, http: &Arc<Http>, channel: ChannelId, memory: ChannelId, input: Input) {
+    fn deliver(&self, http: &Arc<Http>, channel: ChannelId, input: Input) {
         let Ok(mut channels) = self.channels.lock() else {
             tracing::error!("channel map lock poisoned");
             return;
@@ -116,7 +115,6 @@ impl Handler {
                 Arc::clone(&self.mcp),
                 Arc::clone(http),
                 channel,
-                memory,
                 rx,
             ));
             tx
@@ -156,7 +154,6 @@ impl Handler {
         self.deliver(
             &ctx.http,
             click.channel_id,
-            click.channel_id,
             Input::Decision {
                 message: click.message.id,
                 run,
@@ -177,11 +174,11 @@ impl EventHandler for Handler {
         if let Err(err) = msg.react(&ctx.http, RECEIVED).await {
             tracing::warn!("failed to react to message: {err:#}");
         }
-        let (channel, memory) = match route(&ctx, &msg).await {
-            Ok(route) => route,
+        let channel = match route(&ctx, &msg).await {
+            Ok(channel) => channel,
             Err(err) => {
                 tracing::warn!("failed to open a thread, answering in place: {err:#}");
-                (msg.channel_id, msg.channel_id)
+                msg.channel_id
             }
         };
         let attachments = msg
@@ -195,7 +192,7 @@ impl EventHandler for Handler {
             origin: msg.channel_id,
             message: msg.id,
         };
-        self.deliver(&ctx.http, channel, memory, input);
+        self.deliver(&ctx.http, channel, input);
     }
 
     async fn ready(&self, _ctx: Context, ready: Ready) {
@@ -212,16 +209,16 @@ impl EventHandler for Handler {
     }
 }
 
-/// Where `msg` is answered and whose memory applies: a new thread off a message in a server text
-/// channel, the parent channel's memory inside a thread, and the channel itself for DMs.
-async fn route(ctx: &Context, msg: &Message) -> Result<(ChannelId, ChannelId)> {
+/// Where `msg` is answered: a new thread off a message in a server text channel, otherwise
+/// the channel itself.
+async fn route(ctx: &Context, msg: &Message) -> Result<ChannelId> {
     let here = msg.channel_id;
     if msg.guild_id.is_none() {
-        return Ok((here, here));
+        return Ok(here);
     }
     // ponytail: one channel lookup per server message; enable serenity's cache if volume grows.
     let Some(channel) = here.to_channel(&ctx.http).await?.guild() else {
-        return Ok((here, here));
+        return Ok(here);
     };
     Ok(match channel.kind {
         ChannelType::Text | ChannelType::News => {
@@ -230,12 +227,9 @@ async fn route(ctx: &Context, msg: &Message) -> Result<(ChannelId, ChannelId)> {
             let thread = here
                 .create_thread_from_message(&ctx.http, msg.id, thread)
                 .await?;
-            (thread.id, here)
+            thread.id
         }
-        ChannelType::PublicThread | ChannelType::PrivateThread | ChannelType::NewsThread => {
-            (here, channel.parent_id.unwrap_or(here))
-        }
-        _ => (here, here),
+        _ => here,
     })
 }
 
@@ -263,12 +257,10 @@ async fn run_channel(
     mcp: Arc<Mcp>,
     http: Arc<Http>,
     channel: ChannelId,
-    memory: ChannelId,
     inbox: mpsc::UnboundedReceiver<Input>,
 ) {
     let key = format!("discord:{channel}");
-    let memory_key = format!("discord:{memory}");
-    let mut agent = match Agent::new(config, db, mcp, &key, &memory_key).await {
+    let mut agent = match Agent::new(config, db, mcp, &key).await {
         Ok(agent) => agent,
         Err(err) => {
             tracing::error!("failed to start agent: {err:#}");

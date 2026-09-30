@@ -123,6 +123,6 @@ async fn chat(config: config::Config) -> Result<()> {
     }
     let db = db::Db::open(&config.database_path)?;
     let mcp = std::sync::Arc::new(mcp::Mcp::connect(&config.mcp).await);
-    let agent = agent::Agent::new(config, db, mcp, "terminal", "terminal").await?;
+    let agent = agent::Agent::new(config, db, mcp, "terminal").await?;
     chat::run(agent).await
 }

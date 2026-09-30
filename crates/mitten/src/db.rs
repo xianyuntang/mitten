@@ -16,6 +16,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/0003_memories.sql"),
     include_str!("../migrations/0004_memories_per_conversation.sql"),
     include_str!("../migrations/0005_archived_messages.sql"),
+    include_str!("../migrations/0006_global_memories.sql"),
 ];
 
 /// Row of `conversations`.
@@ -193,12 +194,10 @@ impl Db {
 }
 
 impl Db {
-    pub async fn memories(&self, conversation_id: i64) -> Result<Vec<Memory>> {
+    pub async fn memories(&self) -> Result<Vec<Memory>> {
         self.with_conn(move |conn| {
-            let mut stmt = conn.prepare(
-                "SELECT id, content FROM memories WHERE conversation_id = ?1 ORDER BY id",
-            )?;
-            let rows = stmt.query_map(params![conversation_id], Memory::from_row)?;
+            let mut stmt = conn.prepare("SELECT id, content FROM memories ORDER BY id")?;
+            let rows = stmt.query_map([], Memory::from_row)?;
             Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
         })
         .await
@@ -206,21 +205,20 @@ impl Db {
 
     // ponytail: edits are planned against a read taken just before; two processes editing
     // memory at the same instant could overshoot the budget slightly.
-    pub async fn save_memory(&self, conversation_id: i64, edit: Edit) -> Result<()> {
+    pub async fn save_memory(&self, edit: Edit) -> Result<()> {
         self.with_conn(move |conn| {
             match edit {
                 Edit::Add(content) => conn.execute(
-                    "INSERT INTO memories (conversation_id, content) VALUES (?1, ?2)",
-                    params![conversation_id, content],
+                    "INSERT INTO memories (content) VALUES (?1)",
+                    params![content],
                 )?,
                 Edit::Replace(id, content) => conn.execute(
-                    "UPDATE memories SET content = ?3 WHERE id = ?1 AND conversation_id = ?2",
-                    params![id, conversation_id, content],
+                    "UPDATE memories SET content = ?2 WHERE id = ?1",
+                    params![id, content],
                 )?,
-                Edit::Remove(id) => conn.execute(
-                    "DELETE FROM memories WHERE id = ?1 AND conversation_id = ?2",
-                    params![id, conversation_id],
-                )?,
+                Edit::Remove(id) => {
+                    conn.execute("DELETE FROM memories WHERE id = ?1", params![id])?
+                }
             };
             Ok(())
         })
@@ -305,43 +303,37 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn memories_round_trip_per_conversation() {
+    async fn memories_round_trip() {
         let db = Db::open_in_memory().expect("open");
-        let here = db.conversation("a").await.expect("create").id;
-        let there = db.conversation("b").await.expect("create").id;
-        db.save_memory(here, Edit::Add("a".to_owned()))
+        db.save_memory(Edit::Add("a".to_owned()))
             .await
             .expect("add");
-        db.save_memory(here, Edit::Add("b".to_owned()))
-            .await
-            .expect("add");
-        db.save_memory(there, Edit::Add("other".to_owned()))
+        db.save_memory(Edit::Add("b".to_owned()))
             .await
             .expect("add");
         let ids: Vec<i64> = db
-            .memories(here)
+            .memories()
             .await
             .expect("load")
             .iter()
             .map(|m| m.id)
             .collect();
-        db.save_memory(here, Edit::Replace(ids[0], "a2".to_owned()))
+        db.save_memory(Edit::Replace(ids[0], "a2".to_owned()))
             .await
             .expect("replace");
-        db.save_memory(here, Edit::Remove(ids[1]))
+        db.save_memory(Edit::Remove(ids[1])).await.expect("remove");
+        let contents: Vec<String> = db
+            .memories()
             .await
-            .expect("remove");
-        // An edit can't reach into another conversation's memory.
-        db.save_memory(there, Edit::Remove(ids[0]))
-            .await
-            .expect("no-op");
-        let contents = |rows: Vec<Memory>| rows.into_iter().map(|m| m.content).collect::<Vec<_>>();
-        assert_eq!(contents(db.memories(here).await.expect("load")), ["a2"]);
-        assert_eq!(contents(db.memories(there).await.expect("load")), ["other"]);
+            .expect("load")
+            .into_iter()
+            .map(|m| m.content)
+            .collect();
+        assert_eq!(contents, ["a2"]);
     }
 
     #[test]
-    fn global_memories_are_copied_to_every_conversation() {
+    fn memories_go_per_conversation_and_back_to_global() {
         let mut conn = Connection::open_in_memory().expect("open");
         conn.pragma_update(None, "foreign_keys", true).expect("fk");
         let tx = conn.transaction().expect("tx");
@@ -362,6 +354,23 @@ mod tests {
             )
             .expect("count");
         assert_eq!(count, 2);
+
+        tx.execute_batch(
+            "INSERT INTO memories (conversation_id, content) VALUES (2, 'only in discord');",
+        )
+        .expect("seed");
+        for sql in &MIGRATIONS[4..6] {
+            tx.execute_batch(sql).expect("later migrations");
+        }
+        let mut stmt = tx
+            .prepare("SELECT content FROM memories ORDER BY id")
+            .expect("prepare");
+        let merged: Vec<String> = stmt
+            .query_map([], |row| row.get(0))
+            .expect("query")
+            .collect::<rusqlite::Result<_>>()
+            .expect("rows");
+        assert_eq!(merged, ["fact", "only in discord"]);
     }
 
     #[tokio::test]
