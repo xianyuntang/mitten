@@ -88,6 +88,7 @@ case ":$PATH:" in
     *) echo "note: $dir is not on your PATH; add it in your shell profile, e.g.
     export PATH=\"$dir:\$PATH\"" ;;
 esac
-echo "next:
+# `mitten update` sets this; the setup hints are for first installs.
+[ -n "${MITTEN_UPDATING:-}" ] || echo "next:
   mitten configure   # set up the model, Discord, tools
   mitten install     # run it in the background (reinstall after upgrading)"

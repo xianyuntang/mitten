@@ -8,6 +8,7 @@ use anyhow::{Context, Result, bail};
 
 const LABEL: &str = "dev.mitten.serve";
 const UNIT: &str = "mitten.service";
+const INSTALL_SCRIPT: &str = "https://raw.githubusercontent.com/xianyuntang/mitten/main/install.sh";
 
 pub fn install(config_path: &Path) -> Result<()> {
     let exe = std::env::current_exe().context("failed to locate the mitten binary")?;
@@ -30,6 +31,38 @@ pub fn uninstall() -> Result<()> {
     } else {
         bail!("`mitten uninstall` supports macOS (launchd) and Linux (systemd)")
     }
+}
+
+/// Reinstalls the latest release over this binary with install.sh, then restarts the background
+/// service if one is installed so it picks up the new binary.
+pub fn update() -> Result<()> {
+    let exe = std::env::current_exe().context("failed to locate the mitten binary")?;
+    let dir = exe
+        .parent()
+        .context("the mitten binary has no parent directory")?;
+    // Download first so a failed fetch fails here instead of piping nothing into sh.
+    let script =
+        format!("script=$(curl -fsSL {INSTALL_SCRIPT}) && printf '%s\\n' \"$script\" | sh");
+    let status = Command::new("sh")
+        .args(["-c", &script])
+        .env("MITTEN_INSTALL_DIR", dir)
+        .env("MITTEN_UPDATING", "1")
+        .status()
+        .context("failed to run sh")?;
+    if !status.success() {
+        bail!("update failed: {status}");
+    }
+    let home = std::env::home_dir().context("cannot find home directory")?;
+    if cfg!(target_os = "macos") && plist_path(&home).exists() {
+        let plist = plist_path(&home);
+        let _ = launchctl(&["unload", path_str(&plist)?]);
+        launchctl(&["load", "-w", path_str(&plist)?])?;
+        println!("restarted the background service");
+    } else if cfg!(target_os = "linux") && unit_path(&home).exists() {
+        systemctl(&["restart", UNIT])?;
+        println!("restarted the background service");
+    }
+    Ok(())
 }
 
 fn plist_path(home: &Path) -> PathBuf {

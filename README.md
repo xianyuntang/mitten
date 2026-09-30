@@ -23,6 +23,9 @@ The script downloads the release for your platform, checks its SHA-256, and puts
 | `MITTEN_VERSION` | latest | Release tag to install, e.g. `v0.1.0` |
 | `MITTEN_INSTALL_DIR` | `~/.local/bin` | Where the binary goes |
 
+To upgrade later, run `mitten update`. It reinstalls the latest release over the current binary
+and restarts the background service if one is installed.
+
 Or build from source with Rust 1.88 or newer:
 
 ```sh
@@ -76,8 +79,8 @@ mitten uninstall
 
 The service runs `mitten serve` and restarts it if it exits. `mitten install` records your
 shell's `PATH`, so `npx`, `uvx`, and `claude` resolve the way they do in your terminal, whether
-they come from Homebrew, asdf, nvm, or elsewhere. Run it again after upgrading mitten or
-installing new tools.
+they come from Homebrew, asdf, nvm, or elsewhere. `mitten update` restarts it for you; run
+`mitten install` again after installing new tools.
 
 Logs:
 
