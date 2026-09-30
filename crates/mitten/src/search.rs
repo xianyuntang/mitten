@@ -17,8 +17,11 @@ const MAX_SNIPPET_CHARS: usize = 300;
 /// System prompt section, included only when `web_search` is available.
 pub const GUIDANCE: &str = "\
 # Web search
-When a question needs information from the web, search several times before answering; one \
-search is rarely enough. Start broad, then rephrase: different keywords and synonyms, more specific \
+Before answering any question that asks for facts, news, prices, versions, docs, \
+recommendations, or anything that may have changed, call web_search first, even if you think you \
+already know the answer; your memory may be outdated. Skip it only for small talk, thanks, or \
+tasks that are purely about local files, memory, or settings. Search several times before \
+answering; one search is rarely enough. Start broad, then rephrase: different keywords and synonyms, more specific \
 terms (names, versions, error messages, dates), both English and the user's language, and \
 site:domain or \"exact phrase\" to target good sources. Compare what the results say and prefer \
 official or primary sources. If results are thin or disagree, keep searching with new queries \
