@@ -21,7 +21,7 @@ pub fn tool() -> ToolDefinition {
                       starts a fresh conversation with no history and posts its reply here. \
                       `add` needs `name`, `prompt`, and either `cron` (repeat) or `at` (once). `list` shows \
                       every job; `remove` deletes one by `id` or `name`. Times are in the user's time zone; \
-                      call `now` first if you need the date."
+                      the date is in each message's [sent ...] stamp."
             .to_owned(),
         parameters: json!({
             "type": "object",

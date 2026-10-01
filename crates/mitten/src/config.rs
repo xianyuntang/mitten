@@ -358,7 +358,7 @@ pub struct Config {
     pub discord: Option<DiscordSection>,
     /// SQLite file holding conversation history.
     pub database_path: PathBuf,
-    /// The user's time zone, for `now` and scheduled jobs.
+    /// The user's time zone, for message timestamps and scheduled jobs.
     pub timezone: chrono_tz::Tz,
     /// File this was loaded from; empty when parsed from text.
     pub path: PathBuf,

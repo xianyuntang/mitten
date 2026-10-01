@@ -97,7 +97,6 @@ Logs:
 | `read_file`, `list_dir` | Reads files and lists directories. Hidden paths (like `~/.ssh` or `.env`) and Mitten's own config and database are refused. | No |
 | `fetch_url` | Reads a web page as text, optionally rendered in headless Chrome. Private network addresses are refused. | No |
 | `web_search` | Searches through your SearXNG instance. | No |
-| `now` | The date and time in the config's `timezone`. | No |
 | `memory` | Saves short notes that load into later conversations. | No |
 | `cron` | Schedules a named prompt to run later, once (`at`) or on a cron expression, in the config's `timezone` (default: this machine's; restart `mitten serve` after changing it). Each run starts a fresh conversation and posts its reply in the Discord channel or thread where the job was made. Discord only; jobs run while `mitten serve` is up, and a run missed while it was down happens once on startup. Approval prompts during a run are denied unless approval is set to auto. | No |
 | `settings` | Reads or changes the model and a few limits. | Yes |

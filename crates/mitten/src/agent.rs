@@ -14,7 +14,7 @@ use rig_core::message::{
     AssistantContent, Image, Message, ToolCall, ToolResultContent, UserContent,
 };
 use rig_core::providers::{anthropic, openai};
-use serde_json::{Value, json};
+use serde_json::Value;
 
 use crate::claude_code;
 use crate::compact;
@@ -177,8 +177,9 @@ When unsure, say so plainly.
 Your built-in tools only read; you cannot run commands. Tools named <server>__<tool> come from MCP \
 servers the user connected and may act; the user may be asked to approve those calls, and if one is \
 denied, don't retry it or a variant. If you say you'll do something, make the call in the same response.
-Never answer from memory what a tool can tell you: the time and date (now), file contents \
-(read_file, list_dir). If a task needs a command run or a file changed, say what to run and let the \
+Each user message starts with the time it was sent, like [sent 2026-01-02 09:00:00 CST ...]; \
+take the date and time from there, never from your own sense of today. Never answer from memory \
+what a tool can tell you, like file contents (read_file, list_dir). If a task needs a command run or a file changed, say what to run and let the \
 user do it.
 Hidden paths (starting with .) are refused; don't try to get around that.
 If something fails and blocks you, say so and try another route. Never fabricate output.
@@ -247,14 +248,6 @@ fn pretty_name(os_release: &str) -> Option<String> {
     })
 }
 
-fn now_tool() -> ToolDefinition {
-    ToolDefinition {
-        name: "now".to_owned(),
-        description: "The current date, time, weekday, and time zone (the user's, from settings or this machine).".to_owned(),
-        parameters: json!({"type": "object", "properties": {}}),
-    }
-}
-
 /// The current time in `zone`, e.g. `2026-10-01 09:00:00 CST Asia/Taipei (UTC+0800), Thursday`.
 fn now(zone: chrono_tz::Tz) -> String {
     chrono::Utc::now()
@@ -278,7 +271,6 @@ fn request(
             .collect(),
         documents: Vec::new(),
         tools: [
-            now_tool(),
             files::read_tool(),
             files::list_tool(),
             memory::tool(),
@@ -612,10 +604,14 @@ impl Agent {
     }
 
     async fn drive(&mut self, prompt: &str, images: Vec<Image>, io: &mut impl Io) -> Result<()> {
-        // An image sent alone has no text; providers reject empty text blocks.
-        let content = (!prompt.is_empty())
-            .then(|| UserContent::text(prompt))
-            .into_iter()
+        // Models skip a clock tool and guess the date, so every message carries its send time.
+        let sent = format!("[sent {}]", now(self.config.timezone));
+        let text = if prompt.is_empty() {
+            sent
+        } else {
+            format!("{sent}\n{prompt}")
+        };
+        let content = std::iter::once(UserContent::text(text))
             .chain(images.into_iter().map(UserContent::Image))
             .collect();
         self.messages.push(Message::User { content });
@@ -664,7 +660,6 @@ impl Agent {
             let mut results = Vec::new();
             for call in &calls {
                 let output = match call.function.name.as_str() {
-                    "now" => now(self.config.timezone),
                     "claude_code" => match &self.config.claude_code {
                         Some(config) => {
                             claude_code::run(config, &call.function.arguments, io).await?
