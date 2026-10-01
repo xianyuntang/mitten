@@ -451,7 +451,7 @@ impl Config {
 }
 
 /// This machine's time zone (`TZ`, else the system setting), or UTC if it can't be read.
-fn system_timezone() -> chrono_tz::Tz {
+pub fn system_timezone() -> chrono_tz::Tz {
     match iana_time_zone::get_timezone().map(|name| name.parse()) {
         Ok(Ok(zone)) => zone,
         _ => {

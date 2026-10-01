@@ -116,8 +116,9 @@ const CLAUDE: usize = 23;
 const CLAUDE_DIRS: usize = 24;
 const CLAUDE_MODE: usize = 25;
 const CLAUDE_TOOLS: usize = 26;
+const TIMEZONE: usize = 27;
 /// First of the rows for already configured MCP servers.
-const MCP_FIRST: usize = 27;
+const MCP_FIRST: usize = 28;
 
 /// Focus value for the Save button under the fields.
 const BUTTON: usize = usize::MAX;
@@ -346,6 +347,8 @@ impl Form {
             Kind::Text,
             claude.map_or_else(String::new, |c| c.allowed_tools.join(", ")),
         ));
+        let zone = current.map_or_else(config::system_timezone, |c| c.timezone);
+        fields.push(field(5, "Time zone", Kind::Text, zone.name().to_owned()));
         let mcp_names: Vec<String> = current
             .map(|c| c.mcp.keys().cloned().collect())
             .unwrap_or_default();
@@ -532,7 +535,6 @@ impl Form {
         };
         let old = std::fs::read_to_string(path).ok();
         let text = merge_mcp(&render_toml(&answers), old.as_deref(), &remove, add);
-        let text = keep_timezone(&text, old.as_deref());
         let config = Config::parse(&text).context("form produced an invalid config")?;
 
         if !self.force_save {
@@ -586,6 +588,7 @@ impl Form {
             }
             _ => {
                 self.required(DATABASE)?;
+                self.timezone()?;
             }
         }
         Ok(())
@@ -597,6 +600,17 @@ impl Form {
         } else {
             self.required(MODEL)
         }
+    }
+
+    /// `None` when empty, meaning this machine's time zone.
+    fn timezone(&self) -> std::result::Result<Option<String>, String> {
+        let zone = self.value(TIMEZONE);
+        if zone.is_empty() {
+            return Ok(None);
+        }
+        zone.parse::<chrono_tz::Tz>()
+            .map_err(|_| format!("Time zone `{zone}` is not an IANA name like Asia/Taipei"))?;
+        Ok(Some(zone))
     }
 
     fn discord(&self) -> std::result::Result<Option<DiscordAnswers>, String> {
@@ -728,6 +742,7 @@ impl Form {
                 (reviewer != SAME_MODEL).then_some(reviewer)
             }),
             database: PathBuf::from(self.required(DATABASE)?),
+            timezone: self.timezone()?,
         })
     }
 
@@ -898,6 +913,8 @@ struct Answers {
     /// `Some` for auto approval, holding the reviewer model if it isn't the main one.
     auto_approval: Option<Option<String>>,
     database: PathBuf,
+    /// `None` follows this machine's time zone.
+    timezone: Option<String>,
 }
 
 /// MCP servers to remove, and one to add as `(name, table)`.
@@ -935,29 +952,19 @@ fn merge_mcp(
     new.to_string()
 }
 
-/// `text` with the top-level `timezone` from the `old` config file, which the form doesn't edit.
-fn keep_timezone(text: &str, old: Option<&str>) -> String {
-    let zone = old
-        .and_then(|old| old.parse::<DocumentMut>().ok())
-        .and_then(|old| old.get("timezone").cloned());
-    match (text.parse::<DocumentMut>(), zone) {
-        (Ok(mut new), Some(zone)) => {
-            new.insert("timezone", zone);
-            new.to_string()
-        }
-        _ => text.to_owned(),
-    }
-}
-
 /// Quotes and escapes a TOML string.
 fn quote(text: &str) -> String {
     toml::Value::String(text.to_owned()).to_string()
 }
 
 fn render_toml(answers: &Answers) -> String {
-    let mut text = format!(
-        "# Written by `mitten configure`; run it again to change these settings.\n\
-         \n\
+    let mut text =
+        "# Written by `mitten configure`; run it again to change these settings.\n".to_owned();
+    if let Some(zone) = &answers.timezone {
+        text.push_str(&format!("\ntimezone = {}\n", quote(zone)));
+    }
+    text.push_str(&format!(
+        "\n\
          [model]\n\
          name = {model}\n\
          \n\
@@ -973,7 +980,7 @@ fn render_toml(answers: &Answers) -> String {
         key = quote(&answers.api_key),
         log = quote(&answers.log_level),
         db = quote(&answers.database.to_string_lossy()),
-    );
+    ));
     if let Some(reviewer) = &answers.auto_approval {
         text.push_str("\n[approval]\nmode = \"auto\"\n");
         if let Some(model) = reviewer {
@@ -1061,18 +1068,6 @@ mod tests {
     }
 
     #[test]
-    fn keep_timezone_carries_it_over() {
-        let new = "[opencode-go]\napi_key = \"k\"\n";
-        let kept = keep_timezone(
-            new,
-            Some("timezone = \"Asia/Taipei\"\n[log]\nlevel = \"warn\"\n"),
-        );
-        let config = Config::parse(&kept).expect("valid");
-        assert_eq!(config.timezone, chrono_tz::Tz::Asia__Taipei);
-        assert_eq!(keep_timezone(new, None), new);
-    }
-
-    #[test]
     fn merge_mcp_keeps_removes_and_adds_servers() {
         let new = "[opencode-go]\napi_key = \"k\"\n";
         let old = "[opencode-go]\napi_key = \"old\"\n\n\
@@ -1122,8 +1117,10 @@ mod tests {
             log_level: "info".to_owned(),
             auto_approval: Some(Some("glm-5.3-flash".to_owned())),
             database: PathBuf::from("/tmp/m.db"),
+            timezone: Some("Asia/Taipei".to_owned()),
         });
         let config = Config::parse(&text).expect("valid");
+        assert_eq!(config.timezone, chrono_tz::Tz::Asia__Taipei);
         assert_eq!(config.model, "qwen3.8-max");
         let claude = config.claude_code.clone().expect("claude code");
         assert_eq!(
@@ -1189,6 +1186,12 @@ mod tests {
         );
         form.fields[SEARCH_PASSWORD].value = "pw".to_owned();
         form.check_step(form.step).expect("search step valid");
+
+        form.step = 5;
+        form.fields[TIMEZONE].value = "Taipei".to_owned();
+        assert!(form.check_step(form.step).is_err(), "not an IANA name");
+        form.fields[TIMEZONE].value = "Asia/Taipei".to_owned();
+        form.check_step(form.step).expect("advanced step valid");
 
         let answers = form.answers().expect("all steps valid");
         assert_eq!(answers.model, "qwen-next");

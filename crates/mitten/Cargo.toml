@@ -1,6 +1,6 @@
 [package]
 name = "mitten"
-version = "0.1.8"
+version = "0.1.9"
 edition = "2024"
 description = "A personal agent you chat with in the terminal or over Discord"
 license = "MIT OR Apache-2.0"

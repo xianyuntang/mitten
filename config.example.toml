@@ -3,6 +3,7 @@
 
 # Optional. Your IANA time zone, for the `now` tool and scheduled jobs. Defaults to this machine's
 # (`TZ`, else the system setting); set it when Mitten runs somewhere else, like a UTC server.
+# `mitten configure` sets it under Advanced.
 # timezone = "Asia/Taipei"
 
 [model]
