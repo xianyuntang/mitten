@@ -17,6 +17,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/0004_memories_per_conversation.sql"),
     include_str!("../migrations/0005_archived_messages.sql"),
     include_str!("../migrations/0006_global_memories.sql"),
+    include_str!("../migrations/0007_jobs.sql"),
 ];
 
 /// Row of `conversations`.
@@ -74,6 +75,31 @@ impl Memory {
         Ok(Self {
             id: row.get("id")?,
             content: row.get("content")?,
+        })
+    }
+}
+
+/// Row of `jobs`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Job {
+    pub id: i64,
+    /// Conversation key the job was made in, where its runs post.
+    pub target: String,
+    /// Cron expression; `None` runs once.
+    pub schedule: Option<String>,
+    pub prompt: String,
+    /// Unix seconds.
+    pub next_run: i64,
+}
+
+impl Job {
+    fn from_row(row: &Row<'_>) -> rusqlite::Result<Self> {
+        Ok(Self {
+            id: row.get("id")?,
+            target: row.get("target")?,
+            schedule: row.get("schedule")?,
+            prompt: row.get("prompt")?,
+            next_run: row.get("next_run")?,
         })
     }
 }
@@ -224,6 +250,55 @@ impl Db {
         })
         .await
     }
+
+    /// Every scheduled job, soonest first.
+    pub async fn jobs(&self) -> Result<Vec<Job>> {
+        self.with_conn(move |conn| {
+            let mut stmt = conn.prepare(
+                "SELECT id, target, schedule, prompt, next_run FROM jobs ORDER BY next_run, id",
+            )?;
+            let rows = stmt.query_map([], Job::from_row)?;
+            Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+        })
+        .await
+    }
+
+    /// Stores a job and returns its id.
+    pub async fn add_job(
+        &self,
+        target: String,
+        schedule: Option<String>,
+        prompt: String,
+        next_run: i64,
+    ) -> Result<i64> {
+        self.with_conn(move |conn| {
+            conn.execute(
+                "INSERT INTO jobs (target, schedule, prompt, next_run) VALUES (?1, ?2, ?3, ?4)",
+                params![target, schedule, prompt, next_run],
+            )?;
+            Ok(conn.last_insert_rowid())
+        })
+        .await
+    }
+
+    pub async fn set_next_run(&self, id: i64, next_run: i64) -> Result<()> {
+        self.with_conn(move |conn| {
+            conn.execute(
+                "UPDATE jobs SET next_run = ?2 WHERE id = ?1",
+                params![id, next_run],
+            )?;
+            Ok(())
+        })
+        .await
+    }
+
+    /// Deletes a job; false if there was none with that id.
+    pub async fn remove_job(&self, id: i64) -> Result<bool> {
+        self.with_conn(move |conn| {
+            Ok(conn.execute("DELETE FROM jobs WHERE id = ?1", params![id])? > 0)
+        })
+        .await
+    }
 }
 
 fn insert_messages(conn: &Connection, conversation_id: i64, messages: &[Value]) -> Result<()> {
@@ -330,6 +405,31 @@ mod tests {
             .map(|m| m.content)
             .collect();
         assert_eq!(contents, ["a2"]);
+    }
+
+    #[tokio::test]
+    async fn jobs_round_trip() {
+        let db = Db::open_in_memory().expect("open");
+        let later = db
+            .add_job(
+                "discord:1".to_owned(),
+                Some("0 9 * * *".to_owned()),
+                "a".to_owned(),
+                20,
+            )
+            .await
+            .expect("add");
+        let sooner = db
+            .add_job("discord:1".to_owned(), None, "b".to_owned(), 10)
+            .await
+            .expect("add");
+        let ids = |jobs: Vec<Job>| jobs.into_iter().map(|j| j.id).collect::<Vec<_>>();
+        assert_eq!(ids(db.jobs().await.expect("load")), [sooner, later]);
+        db.set_next_run(later, 5).await.expect("update");
+        assert_eq!(ids(db.jobs().await.expect("load")), [later, sooner]);
+        assert!(db.remove_job(sooner).await.expect("remove"));
+        assert!(!db.remove_job(sooner).await.expect("remove again"));
+        assert_eq!(ids(db.jobs().await.expect("load")), [later]);
     }
 
     #[test]

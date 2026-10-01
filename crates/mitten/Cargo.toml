@@ -1,6 +1,6 @@
 [package]
 name = "mitten"
-version = "0.1.5"
+version = "0.1.6"
 edition = "2024"
 description = "A personal agent you chat with in the terminal or over Discord"
 license = "MIT OR Apache-2.0"
@@ -10,6 +10,8 @@ repository = "https://github.com/xianyuntang/mitten"
 anyhow = "1.0.104"
 base64 = "0.22"
 chromiumoxide = "0.9.1"
+chrono = "0.4.45"
+croner = "4.0.0"
 futures = "0.3"
 html2text = "0.17.1"
 ratatui = { version = "0.30.2", features = ["unstable-rendered-line-info"] }

@@ -20,7 +20,8 @@ use tokio::sync::mpsc;
 
 use crate::agent::{Agent, Io};
 use crate::config::Config;
-use crate::db::Db;
+use crate::cron;
+use crate::db::{Db, Job};
 use crate::mcp::Mcp;
 
 const CONFIRM_TIMEOUT: Duration = Duration::from_secs(10 * 60);
@@ -38,6 +39,8 @@ const RUN: &str = "mitten:run";
 const DENY: &str = "mitten:deny";
 /// Longest status line kept; statuses are one-line summaries.
 const MAX_STATUS_CHARS: usize = 200;
+/// How often the scheduler looks for due jobs.
+const CRON_TICK: Duration = Duration::from_secs(30);
 /// Discord caps thread names at 100 characters.
 const MAX_THREAD_NAME_CHARS: usize = 80;
 /// Anthropic rejects images over 5 MB; larger attachments are left out.
@@ -73,9 +76,9 @@ pub async fn serve(config: Config) -> Result<()> {
         | GatewayIntents::MESSAGE_CONTENT;
     let mcp = Arc::new(Mcp::connect(&config.mcp).await);
     let handler = Handler {
-        mcp,
-        config,
-        db,
+        mcp: Arc::clone(&mcp),
+        config: config.clone(),
+        db: db.clone(),
         allowed_users: discord.allowed_users,
         channels: Mutex::new(HashMap::new()),
     };
@@ -83,7 +86,95 @@ pub async fn serve(config: Config) -> Result<()> {
         .event_handler(handler)
         .await
         .context("failed to build Discord client")?;
+    tokio::spawn(run_scheduler(config, db, mcp, Arc::clone(&client.http)));
     client.start().await.context("Discord connection failed")
+}
+
+/// Starts every due job, forever. A job missed while mitten was down runs once on startup.
+async fn run_scheduler(config: Config, db: Db, mcp: Arc<Mcp>, http: Arc<Http>) {
+    let mut tick = tokio::time::interval(CRON_TICK);
+    loop {
+        tick.tick().await;
+        if let Err(err) = start_due_jobs(&config, &db, &mcp, &http).await {
+            tracing::warn!("scheduler tick failed: {err:#}");
+        }
+    }
+}
+
+/// Moves each due job to its next run (or deletes a one-off) before starting it, so a slow run
+/// can't start twice.
+// ponytail: scans every job each tick; query by next_run if job counts grow large.
+async fn start_due_jobs(config: &Config, db: &Db, mcp: &Arc<Mcp>, http: &Arc<Http>) -> Result<()> {
+    let now = chrono::Local::now();
+    for job in db.jobs().await? {
+        if job.next_run > now.timestamp() {
+            break; // Sorted soonest first.
+        }
+        match job.schedule.as_deref().map(|s| cron::next_run(s, now)) {
+            Some(Ok(next)) => db.set_next_run(job.id, next).await?,
+            Some(Err(err)) => {
+                tracing::warn!(job = job.id, "dropping job: {err}");
+                db.remove_job(job.id).await?;
+                continue;
+            }
+            None => {
+                db.remove_job(job.id).await?;
+            }
+        }
+        tokio::spawn(run_job(
+            config.clone(),
+            db.clone(),
+            Arc::clone(mcp),
+            Arc::clone(http),
+            job,
+        ));
+    }
+    Ok(())
+}
+
+/// Runs one job in its own fresh conversation and posts the result where the job was made.
+#[tracing::instrument(skip_all, fields(job = job.id))]
+async fn run_job(config: Config, db: Db, mcp: Arc<Mcp>, http: Arc<Http>, job: Job) {
+    let Some(channel) = job
+        .target
+        .strip_prefix("discord:")
+        .and_then(|id| id.parse().ok())
+        .map(ChannelId::new)
+    else {
+        tracing::warn!(target = job.target, "job target is not a Discord channel");
+        return;
+    };
+    // No one can answer an approval here: with the sender gone, `confirm` sees a closed inbox
+    // and denies. Auto approval still reviews and runs.
+    let (_, inbox) = mpsc::unbounded_channel();
+    let mut io = DiscordIo {
+        http,
+        web: reqwest::Client::new(),
+        channel,
+        inbox,
+        approval: None,
+        status: None,
+    };
+    let first_line = job.prompt.lines().next().unwrap_or_default();
+    let run = async {
+        io.note(&format!("⏰ job #{}: {first_line}", job.id))
+            .await?;
+        let mut agent = Agent::new(config, db, mcp, &format!("cron:{}", job.id)).await?;
+        // The last run's transcript stays on disk until the next one starts.
+        agent.reset().await?;
+        agent
+            .run_turn(&cron::prompt(&job), Vec::new(), &mut io)
+            .await
+    };
+    if let Err(err) = run.await {
+        tracing::warn!("job failed: {err:#}");
+        if let Err(err) = io
+            .say(&format!("error: job #{} failed: {err:#}", job.id))
+            .await
+        {
+            tracing::error!("failed to report job failure: {err:#}");
+        }
+    }
 }
 
 struct Handler {

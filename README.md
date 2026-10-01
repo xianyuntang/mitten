@@ -99,6 +99,7 @@ Logs:
 | `web_search` | Searches through your SearXNG instance. | No |
 | `now` | The local date and time. | No |
 | `memory` | Saves short notes that load into later conversations. | No |
+| `cron` | Schedules a prompt to run later, once (`at`) or on a cron expression in local time. Each run starts a fresh conversation and posts its reply in the Discord channel or thread where the job was made. Discord only; jobs run while `mitten serve` is up, and a run missed while it was down happens once on startup. Approval prompts during a run are denied unless approval is set to auto. | No |
 | `settings` | Reads or changes the model and a few limits. | Yes |
 | MCP tools | Any tool from the MCP servers you connect. | Yes, per server |
 | `claude_code` | Hands a coding task to Claude Code. | Yes |

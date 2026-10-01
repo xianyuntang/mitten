@@ -19,6 +19,7 @@ use serde_json::{Value, json};
 use crate::claude_code;
 use crate::compact;
 use crate::config::{Api, Config};
+use crate::cron;
 use crate::db::Db;
 use crate::fetch::{self, Fetcher};
 use crate::files;
@@ -209,8 +210,9 @@ async fn system_prompt(db: &Db, key: &str, config: &Config) -> Result<String> {
 }
 
 /// Formatting guidance for where the conversation lives, keyed like `Agent::new`.
+/// Scheduled jobs (`cron:<id>`) post to Discord too.
 fn platform_hint(key: &str) -> &'static str {
-    if key.starts_with("discord:") {
+    if key.starts_with("discord:") || key.starts_with("cron:") {
         "You are chatting over Discord. Markdown renders; tables do not, use bullets. Keep replies short."
     } else {
         "You are in a plain terminal. Markdown does not render; write plain text."
@@ -370,6 +372,52 @@ impl Agent {
             "saved; memory uses {used}/{} characters. Every conversation sees it from its next message.",
             memory::CHAR_LIMIT
         ))
+    }
+
+    /// Whether this conversation may schedule jobs: only Discord ones, since `mitten serve` runs
+    /// them and posts back there. Job runs themselves can't schedule more.
+    fn schedules(&self) -> bool {
+        self.key.starts_with("discord:")
+    }
+
+    /// Runs one cron tool call; problems go back to the model as text.
+    async fn cron(&self, args: &Value, io: &mut impl Io) -> Result<String> {
+        match args["action"].as_str() {
+            Some("list") => Ok(cron::list(&self.db.jobs().await?)),
+            Some("add") => {
+                let job = match cron::plan(args, chrono::Local::now()) {
+                    Ok(job) => job,
+                    Err(problem) => return Ok(format!("error: {problem}")),
+                };
+                let when = match &job.schedule {
+                    Some(schedule) => {
+                        format!("{schedule}, next {}", cron::local_time(job.next_run))
+                    }
+                    None => format!("once at {}", cron::local_time(job.next_run)),
+                };
+                let id = self
+                    .db
+                    .add_job(self.key.clone(), job.schedule, job.prompt, job.next_run)
+                    .await?;
+                let note = format!("⏰ scheduled #{id} ({when})");
+                io.note(&note).await?;
+                Ok(note)
+            }
+            Some("remove") => {
+                let Some(id) = args["id"].as_i64() else {
+                    return Ok("error: `id` is required for remove".to_owned());
+                };
+                if !self.db.remove_job(id).await? {
+                    return Ok(format!("error: no job #{id}"));
+                }
+                let note = format!("⏰ removed #{id}");
+                io.note(&note).await?;
+                Ok(note)
+            }
+            other => Ok(format!(
+                "error: unknown action {other:?}; use add, list, or remove"
+            )),
+        }
     }
 
     /// Runs one search and tells the user what was searched.
@@ -579,15 +627,16 @@ impl Agent {
             .chain(images.into_iter().map(UserContent::Image))
             .collect();
         self.messages.push(Message::User { content });
+        let extra: Vec<ToolDefinition> = self
+            .schedules()
+            .then(cron::tool)
+            .into_iter()
+            .chain(self.mcp.tools().iter().cloned())
+            .collect();
         loop {
             let response = self
                 .model
-                .complete(request(
-                    &self.config,
-                    &self.system,
-                    &self.messages,
-                    self.mcp.tools(),
-                ))
+                .complete(request(&self.config, &self.system, &self.messages, &extra))
                 .await
                 .context("model request failed")?;
             match response.finish_reason() {
@@ -639,6 +688,7 @@ impl Agent {
                     }
                     "list_dir" => files::list(&self.config, &call.function.arguments).await,
                     "memory" => self.remember(&call.function.arguments, io).await?,
+                    "cron" if self.schedules() => self.cron(&call.function.arguments, io).await?,
                     "settings" => self.settings(&call.function.arguments, io).await?,
                     "fetch_url" => {
                         let args = &call.function.arguments;

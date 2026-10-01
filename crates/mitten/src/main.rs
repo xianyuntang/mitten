@@ -3,6 +3,7 @@ mod chat;
 mod claude_code;
 mod compact;
 mod config;
+mod cron;
 mod db;
 mod discord;
 mod fetch;
