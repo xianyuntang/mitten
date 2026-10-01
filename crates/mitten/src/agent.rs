@@ -184,8 +184,8 @@ If something fails and blocks you, say so and try another route. Never fabricate
 When the obvious interpretation is clear, act; ask only when the ambiguity changes what you would run.";
 
 /// Most stable text first and memory last, so the provider can cache the prefix: a memory edit
-/// only changes the tail. Memory is read once here, so edits show up from the next conversation
-/// (or `/new`) on, and the prompt stays byte-identical within one.
+/// only changes the tail. Rebuilt before every turn, so memory saved in any conversation shows up
+/// on the next message everywhere; the text only changes when memory or settings do.
 /// Web search and Claude Code guidance are added when those tools are configured.
 async fn system_prompt(db: &Db, key: &str, config: &Config) -> Result<String> {
     let cwd = std::env::current_dir().context("failed to read current directory")?;
@@ -367,7 +367,7 @@ impl Agent {
         self.db.save_memory(edit).await?;
         io.note(&note).await?;
         Ok(format!(
-            "saved; memory uses {used}/{} characters. It loads into the next conversation.",
+            "saved; memory uses {used}/{} characters. Every conversation sees it from its next message.",
             memory::CHAR_LIMIT
         ))
     }
@@ -480,6 +480,7 @@ impl Agent {
         io: &mut impl Io,
     ) -> Result<()> {
         self.reload()?;
+        self.system = system_prompt(&self.db, &self.key, &self.config).await?;
         self.compact_if_needed(prompt, io).await?;
         let turn_start = self.messages.len();
         let result = match self.reviewer.clone() {
@@ -567,8 +568,6 @@ impl Agent {
     pub async fn reset(&mut self) -> Result<()> {
         self.db.clear(self.conversation_id).await?;
         self.messages.clear();
-        // A fresh conversation picks up memory saved since the last one started.
-        self.system = system_prompt(&self.db, &self.key, &self.config).await?;
         Ok(())
     }
 

@@ -1,5 +1,5 @@
 //! Long-term memory: short facts the agent saves itself, shared by every conversation (the terminal
-//! and every Discord channel) and loaded whenever a conversation starts, even after `/new`.
+//! and every Discord channel) and loaded before every turn, so it survives `/new`.
 
 use serde_json::{Value, json};
 
@@ -15,7 +15,7 @@ pub const CHAR_LIMIT: usize = 2_200;
 pub const GUIDANCE: &str = "\
 # Memory
 You have long-term memory shared by every conversation (the terminal and every Discord channel); \
-it survives /new and is loaded whenever a conversation starts. \
+it survives /new and is reloaded before every message. \
 Save with the memory tool facts that matter from now on: who you are talking to, their \
 preferences, names or roles they give you, stable facts about this machine, standing conventions. \
 When the user asks you to remember something, or tells you such a fact, call the memory tool in \
@@ -38,7 +38,7 @@ pub fn tool() -> ToolDefinition {
         name: "memory".to_owned(),
         description: format!(
             "Add, replace, or remove a long-term memory entry, shared by every conversation. Entries \
-             load every time one starts, so keep them short and high-signal. Total budget: {CHAR_LIMIT} characters."
+             load before every message, so keep them short and high-signal. Total budget: {CHAR_LIMIT} characters."
         ),
         parameters: json!({
             "type": "object",
