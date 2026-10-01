@@ -395,11 +395,9 @@ impl Agent {
                     }
                     None => format!("once at {}", cron::local_time(job.next_run)),
                 };
-                let id = self
-                    .db
-                    .add_job(self.key.clone(), job.schedule, job.prompt, job.next_run)
-                    .await?;
-                let note = format!("⏰ scheduled #{id} ({when})");
+                let name = job.name.clone();
+                let id = self.db.add_job(self.key.clone(), job).await?;
+                let note = format!("⏰ scheduled #{id} {name} ({when})");
                 io.note(&note).await?;
                 Ok(note)
             }

@@ -155,10 +155,8 @@ async fn run_job(config: Config, db: Db, mcp: Arc<Mcp>, http: Arc<Http>, job: Jo
         approval: None,
         status: None,
     };
-    let first_line = job.prompt.lines().next().unwrap_or_default();
     let run = async {
-        io.note(&format!("⏰ job #{}: {first_line}", job.id))
-            .await?;
+        io.note(&format!("⏰ job #{} {}", job.id, job.name)).await?;
         let mut agent = Agent::new(config, db, mcp, &format!("cron:{}", job.id)).await?;
         // The last run's transcript stays on disk until the next one starts.
         agent.reset().await?;
@@ -169,7 +167,10 @@ async fn run_job(config: Config, db: Db, mcp: Arc<Mcp>, http: Arc<Http>, job: Jo
     if let Err(err) = run.await {
         tracing::warn!("job failed: {err:#}");
         if let Err(err) = io
-            .say(&format!("error: job #{} failed: {err:#}", job.id))
+            .say(&format!(
+                "error: job #{} {} failed: {err:#}",
+                job.id, job.name
+            ))
             .await
         {
             tracing::error!("failed to report job failure: {err:#}");

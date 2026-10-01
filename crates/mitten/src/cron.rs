@@ -18,7 +18,7 @@ pub fn tool() -> ToolDefinition {
         name: "cron".to_owned(),
         description: "Schedule a prompt to run on its own later, once or repeatedly; each run \
                       starts a fresh conversation with no history and posts its reply here. \
-                      `add` needs `prompt` and either `cron` (repeat) or `at` (once). `list` shows \
+                      `add` needs `name`, `prompt`, and either `cron` (repeat) or `at` (once). `list` shows \
                       every job; `remove` deletes one by `id`. Times are the machine's local time; \
                       call `now` first if you need the date."
             .to_owned(),
@@ -26,6 +26,10 @@ pub fn tool() -> ToolDefinition {
             "type": "object",
             "properties": {
                 "action": {"type": "string", "enum": ["add", "list", "remove"]},
+                "name": {
+                    "type": "string",
+                    "description": "For add: a short name for the job, in the user's language, e.g. `Morning news`.",
+                },
                 "prompt": {
                     "type": "string",
                     "description": "For add: what to do on each run. Make it self-contained; the run won't see this conversation.",
@@ -48,6 +52,7 @@ pub fn tool() -> ToolDefinition {
 /// A job the cron tool asked for, already validated.
 #[derive(Debug, PartialEq, Eq)]
 pub struct NewJob {
+    pub name: String,
     /// `None` runs once.
     pub schedule: Option<String>,
     pub prompt: String,
@@ -56,17 +61,16 @@ pub struct NewJob {
 
 /// Validates an `add` call at time `now`; errors are messages for the model.
 pub fn plan(args: &Value, now: DateTime<Local>) -> Result<NewJob, String> {
-    let prompt = args["prompt"]
-        .as_str()
-        .map(str::trim)
-        .filter(|p| !p.is_empty())
+    let text = |key: &str| args[key].as_str().map(str::trim).filter(|v| !v.is_empty());
+    let name = text("name").ok_or("`name` is required for add")?.to_owned();
+    let prompt = text("prompt")
         .ok_or("`prompt` is required for add")?
         .to_owned();
-    let text = |key: &str| args[key].as_str().map(str::trim).filter(|v| !v.is_empty());
     match (text("cron"), text("at")) {
         (Some(schedule), None) => Ok(NewJob {
             next_run: next_run(schedule, now)?,
             schedule: Some(schedule.to_owned()),
+            name,
             prompt,
         }),
         (None, Some(at)) => {
@@ -84,6 +88,7 @@ pub fn plan(args: &Value, now: DateTime<Local>) -> Result<NewJob, String> {
             }
             Ok(NewJob {
                 schedule: None,
+                name,
                 prompt,
                 next_run: at.timestamp(),
             })
@@ -122,8 +127,9 @@ pub fn list(jobs: &[Job]) -> String {
     jobs.iter()
         .map(|job| {
             format!(
-                "#{} [{}] next {} in {}: {}",
+                "#{} {} [{}] next {} in {}: {}",
                 job.id,
+                job.name,
                 job.schedule.as_deref().unwrap_or("once"),
                 local_time(job.next_run),
                 job.target,
@@ -137,10 +143,11 @@ pub fn list(jobs: &[Job]) -> String {
 /// What the model is told on a job's run.
 pub fn prompt(job: &Job) -> String {
     format!(
-        "[Scheduled job #{} ({}). You are running on your own in a fresh conversation; nobody is \
+        "[Scheduled job #{} {} ({}). You are running on your own in a fresh conversation; nobody is \
          watching live and actions that need approval will be denied. Do the task and reply with \
          the result.]\n\n{}",
         job.id,
+        job.name,
         job.schedule.as_deref().unwrap_or("once"),
         job.prompt
     )
@@ -158,23 +165,33 @@ mod tests {
     #[test]
     fn plan_validates_schedules() {
         let now = at("2026-10-01 08:30");
-        let job = plan(&json!({"prompt": " news ", "cron": "0 9 * * *"}), now).expect("cron");
+        let job = plan(
+            &json!({"name": " News ", "prompt": " news ", "cron": "0 9 * * *"}),
+            now,
+        )
+        .expect("cron");
         assert_eq!(job.schedule.as_deref(), Some("0 9 * * *"));
+        assert_eq!(job.name, "News");
         assert_eq!(job.prompt, "news");
         assert_eq!(job.next_run, at("2026-10-01 09:00").timestamp());
 
-        let once = plan(&json!({"prompt": "call", "at": "2026-10-02 10:15"}), now).expect("at");
+        let once = plan(
+            &json!({"name": "Call", "prompt": "call", "at": "2026-10-02 10:15"}),
+            now,
+        )
+        .expect("at");
         assert_eq!(once.schedule, None);
         assert_eq!(once.next_run, at("2026-10-02 10:15").timestamp());
 
         for bad in [
-            json!({"cron": "0 9 * * *"}),
-            json!({"prompt": "x"}),
-            json!({"prompt": "x", "cron": "0 9 * * *", "at": "2026-10-02 10:15"}),
-            json!({"prompt": "x", "cron": "* * * * * *"}),
-            json!({"prompt": "x", "cron": "nope"}),
-            json!({"prompt": "x", "at": "2026-09-30 10:00"}),
-            json!({"prompt": "x", "at": "tomorrow"}),
+            json!({"name": "n", "cron": "0 9 * * *"}),
+            json!({"prompt": "x", "cron": "0 9 * * *"}),
+            json!({"name": "n", "prompt": "x"}),
+            json!({"name": "n", "prompt": "x", "cron": "0 9 * * *", "at": "2026-10-02 10:15"}),
+            json!({"name": "n", "prompt": "x", "cron": "* * * * * *"}),
+            json!({"name": "n", "prompt": "x", "cron": "nope"}),
+            json!({"name": "n", "prompt": "x", "at": "2026-09-30 10:00"}),
+            json!({"name": "n", "prompt": "x", "at": "tomorrow"}),
         ] {
             assert!(plan(&bad, now).is_err(), "{bad}");
         }
