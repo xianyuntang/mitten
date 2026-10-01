@@ -1,6 +1,6 @@
 [package]
 name = "mitten"
-version = "0.1.7"
+version = "0.1.8"
 edition = "2024"
 description = "A personal agent you chat with in the terminal or over Discord"
 license = "MIT OR Apache-2.0"
@@ -11,9 +11,11 @@ anyhow = "1.0.104"
 base64 = "0.22"
 chromiumoxide = "0.9.1"
 chrono = "0.4.45"
+chrono-tz = "0.10.4"
 croner = "4.0.0"
 futures = "0.3"
 html2text = "0.17.1"
+iana-time-zone = "0.1.65"
 ratatui = { version = "0.30.2", features = ["unstable-rendered-line-info"] }
 reqwest = { version = "0.13.5", default-features = false, features = ["json", "rustls"] }
 rig-core = "0.42.0"

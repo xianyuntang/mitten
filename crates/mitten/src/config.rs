@@ -53,6 +53,8 @@ impl std::fmt::Debug for Secret {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct File {
+    /// IANA name, e.g. `Asia/Taipei`; defaults to this machine's time zone.
+    timezone: Option<String>,
     #[serde(default)]
     model: ModelSection,
     #[serde(rename = "opencode-go")]
@@ -356,6 +358,8 @@ pub struct Config {
     pub discord: Option<DiscordSection>,
     /// SQLite file holding conversation history.
     pub database_path: PathBuf,
+    /// The user's time zone, for `now` and scheduled jobs.
+    pub timezone: chrono_tz::Tz,
     /// File this was loaded from; empty when parsed from text.
     pub path: PathBuf,
 }
@@ -405,6 +409,12 @@ impl Config {
         for (name, server) in &file.mcp.servers {
             server.validate(name)?;
         }
+        let timezone = match file.timezone {
+            Some(name) => name.parse().map_err(|_| {
+                anyhow::anyhow!("timezone {name:?} is not an IANA time zone like Asia/Taipei")
+            })?,
+            None => system_timezone(),
+        };
         let model = file.model.name.unwrap_or_else(|| DEFAULT_MODEL.to_owned());
         let approval = match file.approval.mode {
             ApprovalMode::Ask => Approval::Ask,
@@ -434,8 +444,20 @@ impl Config {
             log_level: file.log.level,
             discord: file.discord,
             database_path,
+            timezone,
             path: PathBuf::new(),
         })
+    }
+}
+
+/// This machine's time zone (`TZ`, else the system setting), or UTC if it can't be read.
+fn system_timezone() -> chrono_tz::Tz {
+    match iana_time_zone::get_timezone().map(|name| name.parse()) {
+        Ok(Ok(zone)) => zone,
+        _ => {
+            tracing::warn!("cannot read this machine's time zone; using UTC");
+            chrono_tz::Tz::UTC
+        }
     }
 }
 
@@ -475,6 +497,14 @@ mod tests {
         let config = Config::parse(include_str!("../../../config.example.toml")).expect("valid");
         assert_eq!(config.base_url, "https://opencode.ai/zen/go/v1");
         assert_eq!(config.api, Api::Anthropic);
+    }
+
+    #[test]
+    fn timezone_parses_and_bad_ones_are_refused() {
+        let base = "[opencode-go]\napi_key = \"k\"\n";
+        let config = Config::parse(&format!("timezone = \"Asia/Taipei\"\n{base}")).expect("valid");
+        assert_eq!(config.timezone, chrono_tz::Tz::Asia__Taipei);
+        assert!(Config::parse(&format!("timezone = \"Taipei\"\n{base}")).is_err());
     }
 
     #[test]

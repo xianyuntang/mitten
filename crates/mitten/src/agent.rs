@@ -250,25 +250,17 @@ fn pretty_name(os_release: &str) -> Option<String> {
 fn now_tool() -> ToolDefinition {
     ToolDefinition {
         name: "now".to_owned(),
-        description: "The current local date, time, weekday, and time zone.".to_owned(),
+        description: "The current date, time, weekday, and time zone (the user's, from settings or this machine).".to_owned(),
         parameters: json!({"type": "object", "properties": {}}),
     }
 }
 
-/// The local time as `date` prints it; the standard library has no time zone support.
-async fn now() -> String {
-    let date = tokio::process::Command::new("date")
-        .arg("+%Y-%m-%d %H:%M:%S %Z (UTC%z), %A")
-        .output()
-        .await;
-    match date {
-        Ok(out) if out.status.success() => String::from_utf8_lossy(&out.stdout).trim().to_owned(),
-        Ok(out) => format!(
-            "error: date failed: {}",
-            String::from_utf8_lossy(&out.stderr)
-        ),
-        Err(err) => format!("error: cannot run date: {err}"),
-    }
+/// The current time in `zone`, e.g. `2026-10-01 09:00:00 CST Asia/Taipei (UTC+0800), Thursday`.
+fn now(zone: chrono_tz::Tz) -> String {
+    chrono::Utc::now()
+        .with_timezone(&zone)
+        .format(&format!("%Y-%m-%d %H:%M:%S %Z {zone} (UTC%z), %A"))
+        .to_string()
 }
 
 /// `extra` holds tools beyond the built-in ones, i.e. MCP tools.
@@ -382,18 +374,19 @@ impl Agent {
 
     /// Runs one cron tool call; problems go back to the model as text.
     async fn cron(&self, args: &Value, io: &mut impl Io) -> Result<String> {
+        let zone = self.config.timezone;
         match args["action"].as_str() {
-            Some("list") => Ok(cron::list(&self.db.jobs().await?)),
+            Some("list") => Ok(cron::list(&self.db.jobs().await?, zone)),
             Some("add") => {
-                let job = match cron::plan(args, chrono::Local::now()) {
+                let job = match cron::plan(args, chrono::Utc::now().with_timezone(&zone)) {
                     Ok(job) => job,
                     Err(problem) => return Ok(format!("error: {problem}")),
                 };
                 let when = match &job.schedule {
                     Some(schedule) => {
-                        format!("{schedule}, next {}", cron::local_time(job.next_run))
+                        format!("{schedule}, next {}", cron::local_time(job.next_run, zone))
                     }
-                    None => format!("once at {}", cron::local_time(job.next_run)),
+                    None => format!("once at {}", cron::local_time(job.next_run, zone)),
                 };
                 let name = job.name.clone();
                 let id = self.db.add_job(self.key.clone(), job).await?;
@@ -402,13 +395,14 @@ impl Agent {
                 Ok(note)
             }
             Some("remove") => {
-                let Some(id) = args["id"].as_i64() else {
-                    return Ok("error: `id` is required for remove".to_owned());
+                let (id, name) = match cron::target(&self.db.jobs().await?, args, zone) {
+                    Ok(found) => found,
+                    Err(problem) => return Ok(format!("error: {problem}")),
                 };
                 if !self.db.remove_job(id).await? {
                     return Ok(format!("error: no job #{id}"));
                 }
-                let note = format!("⏰ removed #{id}");
+                let note = format!("⏰ removed #{id} {name}");
                 io.note(&note).await?;
                 Ok(note)
             }
@@ -670,7 +664,7 @@ impl Agent {
             let mut results = Vec::new();
             for call in &calls {
                 let output = match call.function.name.as_str() {
-                    "now" => now().await,
+                    "now" => now(self.config.timezone),
                     "claude_code" => match &self.config.claude_code {
                         Some(config) => {
                             claude_code::run(config, &call.function.arguments, io).await?
@@ -804,9 +798,12 @@ mod tests {
         assert!(delete.risky, "{}", delete.reason);
     }
 
-    #[tokio::test]
-    async fn now_reports_the_date() {
-        let text = now().await;
-        assert!(text.starts_with("20") && text.contains("UTC"), "{text}");
+    #[test]
+    fn now_reports_the_date_in_zone() {
+        let text = now(chrono_tz::Tz::Asia__Taipei);
+        assert!(
+            text.starts_with("20") && text.contains("Asia/Taipei (UTC+0800)"),
+            "{text}"
+        );
     }
 }

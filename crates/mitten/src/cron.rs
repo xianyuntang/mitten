@@ -2,7 +2,8 @@
 //! and posts its result where the job was made. Only `mitten serve` runs jobs, so only Discord
 //! conversations get the tool.
 
-use chrono::{DateTime, Local, NaiveDateTime, TimeZone as _};
+use chrono::{DateTime, NaiveDateTime, TimeZone as _};
+use chrono_tz::Tz;
 use croner::Cron;
 use croner::parser::{CronParser, Seconds, Year};
 use rig_core::completion::ToolDefinition;
@@ -10,7 +11,7 @@ use serde_json::{Value, json};
 
 use crate::db::Job;
 
-/// Format of `at`, read in the machine's time zone.
+/// Format of `at`, read in the configured time zone.
 const AT_FORMAT: &str = "%Y-%m-%d %H:%M";
 
 pub fn tool() -> ToolDefinition {
@@ -19,7 +20,7 @@ pub fn tool() -> ToolDefinition {
         description: "Schedule a prompt to run on its own later, once or repeatedly; each run \
                       starts a fresh conversation with no history and posts its reply here. \
                       `add` needs `name`, `prompt`, and either `cron` (repeat) or `at` (once). `list` shows \
-                      every job; `remove` deletes one by `id`. Times are the machine's local time; \
+                      every job; `remove` deletes one by `id` or `name`. Times are in the user's time zone; \
                       call `now` first if you need the date."
             .to_owned(),
         parameters: json!({
@@ -28,7 +29,7 @@ pub fn tool() -> ToolDefinition {
                 "action": {"type": "string", "enum": ["add", "list", "remove"]},
                 "name": {
                     "type": "string",
-                    "description": "For add: a short name for the job, in the user's language, e.g. `Morning news`.",
+                    "description": "For add: a short name for the job, in the user's language, e.g. `Morning news`. For remove: the name of the job to delete.",
                 },
                 "prompt": {
                     "type": "string",
@@ -40,9 +41,9 @@ pub fn tool() -> ToolDefinition {
                 },
                 "at": {
                     "type": "string",
-                    "description": "For add: one run at this local time, `YYYY-MM-DD HH:MM`.",
+                    "description": "For add: one run at this time, `YYYY-MM-DD HH:MM`.",
                 },
-                "id": {"type": "integer", "description": "For remove: the job id from list."},
+                "id": {"type": "integer", "description": "For remove: the job id from list; wins over `name`."},
             },
             "required": ["action"],
         }),
@@ -60,7 +61,7 @@ pub struct NewJob {
 }
 
 /// Validates an `add` call at time `now`; errors are messages for the model.
-pub fn plan(args: &Value, now: DateTime<Local>) -> Result<NewJob, String> {
+pub fn plan(args: &Value, now: DateTime<Tz>) -> Result<NewJob, String> {
     let text = |key: &str| args[key].as_str().map(str::trim).filter(|v| !v.is_empty());
     let name = text("name").ok_or("`name` is required for add")?.to_owned();
     let prompt = text("prompt")
@@ -76,10 +77,11 @@ pub fn plan(args: &Value, now: DateTime<Local>) -> Result<NewJob, String> {
         (None, Some(at)) => {
             let naive = NaiveDateTime::parse_from_str(at, AT_FORMAT)
                 .map_err(|err| format!("`at` must look like 2026-10-02 09:00: {err}"))?;
-            let at = Local
+            let at = now
+                .timezone()
                 .from_local_datetime(&naive)
                 .earliest()
-                .ok_or("`at` does not exist in the local time zone")?;
+                .ok_or("`at` does not exist in this time zone (a DST gap)")?;
             if at <= now {
                 return Err(format!(
                     "`at` is in the past; it is now {}",
@@ -97,8 +99,34 @@ pub fn plan(args: &Value, now: DateTime<Local>) -> Result<NewJob, String> {
     }
 }
 
+/// The job a `remove` call means: by `id`, or by `name` (ignoring case) when it matches exactly one.
+pub fn target(jobs: &[Job], args: &Value, zone: Tz) -> Result<(i64, String), String> {
+    let found: Vec<&Job> = if let Some(id) = args["id"].as_i64() {
+        jobs.iter().filter(|job| job.id == id).collect()
+    } else {
+        let name = args["name"]
+            .as_str()
+            .map(str::trim)
+            .filter(|n| !n.is_empty())
+            .ok_or("`id` or `name` is required for remove")?
+            .to_lowercase();
+        jobs.iter()
+            .filter(|job| job.name.to_lowercase() == name)
+            .collect()
+    };
+    match found.as_slice() {
+        [job] => Ok((job.id, job.name.clone())),
+        [] => Err(format!("no such job\n{}", list(jobs, zone))),
+        many => Err(format!(
+            "{} jobs have that name; remove by `id`\n{}",
+            many.len(),
+            list(jobs, zone)
+        )),
+    }
+}
+
 /// The first time after `after` that `schedule` fires, in Unix seconds.
-pub fn next_run(schedule: &str, after: DateTime<Local>) -> Result<i64, String> {
+pub fn next_run(schedule: &str, after: DateTime<Tz>) -> Result<i64, String> {
     // Five fields only: a seconds field could fire on every scheduler tick.
     let cron: Cron = CronParser::builder()
         .seconds(Seconds::Disallowed)
@@ -111,16 +139,16 @@ pub fn next_run(schedule: &str, after: DateTime<Local>) -> Result<i64, String> {
         .map_err(|err| format!("{schedule:?} never fires: {err}"))
 }
 
-/// A Unix time as local `YYYY-MM-DD HH:MM`.
-pub fn local_time(timestamp: i64) -> String {
-    Local.timestamp_opt(timestamp, 0).single().map_or_else(
+/// A Unix time as `YYYY-MM-DD HH:MM` in `zone`.
+pub fn local_time(timestamp: i64, zone: Tz) -> String {
+    zone.timestamp_opt(timestamp, 0).single().map_or_else(
         || timestamp.to_string(),
         |t| t.format(AT_FORMAT).to_string(),
     )
 }
 
 /// Every job, one per line, for `list`.
-pub fn list(jobs: &[Job]) -> String {
+pub fn list(jobs: &[Job], zone: Tz) -> String {
     if jobs.is_empty() {
         return "no scheduled jobs".to_owned();
     }
@@ -131,7 +159,7 @@ pub fn list(jobs: &[Job]) -> String {
                 job.id,
                 job.name,
                 job.schedule.as_deref().unwrap_or("once"),
-                local_time(job.next_run),
+                local_time(job.next_run, zone),
                 job.target,
                 job.prompt
             )
@@ -157,9 +185,12 @@ pub fn prompt(job: &Job) -> String {
 mod tests {
     use super::*;
 
-    fn at(text: &str) -> DateTime<Local> {
+    fn at(text: &str) -> DateTime<Tz> {
         let naive = NaiveDateTime::parse_from_str(text, AT_FORMAT).expect("time");
-        Local.from_local_datetime(&naive).earliest().expect("local")
+        Tz::Asia__Taipei
+            .from_local_datetime(&naive)
+            .earliest()
+            .expect("local")
     }
 
     #[test]
@@ -195,6 +226,34 @@ mod tests {
         ] {
             assert!(plan(&bad, now).is_err(), "{bad}");
         }
+    }
+
+    #[test]
+    fn target_finds_by_id_or_unique_name() {
+        let job = |id, name: &str| Job {
+            id,
+            name: name.to_owned(),
+            target: "discord:1".to_owned(),
+            schedule: None,
+            prompt: "p".to_owned(),
+            next_run: 0,
+        };
+        let jobs = [job(1, "News"), job(2, "Rent"), job(3, "rent")];
+        assert_eq!(
+            target(&jobs, &json!({"id": 2}), Tz::UTC),
+            Ok((2, "Rent".to_owned()))
+        );
+        assert_eq!(
+            target(&jobs, &json!({"name": " news "}), Tz::UTC),
+            Ok((1, "News".to_owned()))
+        );
+        assert!(
+            target(&jobs, &json!({"name": "rent"}), Tz::UTC).is_err(),
+            "ambiguous"
+        );
+        assert!(target(&jobs, &json!({"name": "nope"}), Tz::UTC).is_err());
+        assert!(target(&jobs, &json!({"id": 9}), Tz::UTC).is_err());
+        assert!(target(&jobs, &json!({}), Tz::UTC).is_err());
     }
 
     #[test]

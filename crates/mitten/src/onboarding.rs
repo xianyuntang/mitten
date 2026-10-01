@@ -532,6 +532,7 @@ impl Form {
         };
         let old = std::fs::read_to_string(path).ok();
         let text = merge_mcp(&render_toml(&answers), old.as_deref(), &remove, add);
+        let text = keep_timezone(&text, old.as_deref());
         let config = Config::parse(&text).context("form produced an invalid config")?;
 
         if !self.force_save {
@@ -934,6 +935,20 @@ fn merge_mcp(
     new.to_string()
 }
 
+/// `text` with the top-level `timezone` from the `old` config file, which the form doesn't edit.
+fn keep_timezone(text: &str, old: Option<&str>) -> String {
+    let zone = old
+        .and_then(|old| old.parse::<DocumentMut>().ok())
+        .and_then(|old| old.get("timezone").cloned());
+    match (text.parse::<DocumentMut>(), zone) {
+        (Ok(mut new), Some(zone)) => {
+            new.insert("timezone", zone);
+            new.to_string()
+        }
+        _ => text.to_owned(),
+    }
+}
+
 /// Quotes and escapes a TOML string.
 fn quote(text: &str) -> String {
     toml::Value::String(text.to_owned()).to_string()
@@ -1043,6 +1058,18 @@ mod tests {
         assert_eq!(gh.env["MODE"].as_str(), "ro");
         form.fields[MCP_ENV].value = "oops".to_owned();
         assert!(form.mcp().is_err());
+    }
+
+    #[test]
+    fn keep_timezone_carries_it_over() {
+        let new = "[opencode-go]\napi_key = \"k\"\n";
+        let kept = keep_timezone(
+            new,
+            Some("timezone = \"Asia/Taipei\"\n[log]\nlevel = \"warn\"\n"),
+        );
+        let config = Config::parse(&kept).expect("valid");
+        assert_eq!(config.timezone, chrono_tz::Tz::Asia__Taipei);
+        assert_eq!(keep_timezone(new, None), new);
     }
 
     #[test]

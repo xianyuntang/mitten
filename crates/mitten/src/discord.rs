@@ -105,7 +105,7 @@ async fn run_scheduler(config: Config, db: Db, mcp: Arc<Mcp>, http: Arc<Http>) {
 /// can't start twice.
 // ponytail: scans every job each tick; query by next_run if job counts grow large.
 async fn start_due_jobs(config: &Config, db: &Db, mcp: &Arc<Mcp>, http: &Arc<Http>) -> Result<()> {
-    let now = chrono::Local::now();
+    let now = chrono::Utc::now().with_timezone(&config.timezone);
     for job in db.jobs().await? {
         if job.next_run > now.timestamp() {
             break; // Sorted soonest first.
