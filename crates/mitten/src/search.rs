@@ -24,7 +24,8 @@ tasks that are purely about local files, memory, or settings. Search several tim
 answering; one search is rarely enough. Start broad, then rephrase: different keywords and synonyms, more specific \
 terms (names, versions, error messages, dates), both English and the user's language, and \
 site:domain or \"exact phrase\" to target good sources. Compare what the results say and prefer \
-official or primary sources. If results are thin or disagree, keep searching with new queries \
+official or primary sources. For news or anything recent, set time_range (day, week, month, \
+year) and category news, and check each result's date against today's. If results are thin or disagree, keep searching with new queries \
 instead of guessing. Snippets are short excerpts; when you need a page's details or the snippets \
 look thin, read the most promising results with fetch_url. Name the URLs your answer relies on.";
 
@@ -37,7 +38,19 @@ pub fn tool() -> ToolDefinition {
             .to_owned(),
         parameters: json!({
             "type": "object",
-            "properties": {"query": {"type": "string", "description": "What to search for."}},
+            "properties": {
+                "query": {"type": "string", "description": "What to search for."},
+                "time_range": {
+                    "type": "string",
+                    "enum": ["day", "week", "month", "year"],
+                    "description": "Only results from this recent period; omit for any time.",
+                },
+                "category": {
+                    "type": "string",
+                    "enum": ["general", "news"],
+                    "description": "news searches news sites; default general.",
+                },
+            },
             "required": ["query"],
         }),
     }
@@ -68,18 +81,32 @@ impl WebSearch {
         else {
             return "error: `query` is required".to_owned();
         };
-        match self.fetch(query).await {
+        // Only known values reach SearXNG; anything else falls back to its default.
+        let pick = |key: &str, allowed: &[&'static str]| {
+            args[key]
+                .as_str()
+                .and_then(|v| allowed.iter().find(|a| **a == v).copied())
+        };
+        let time_range = pick("time_range", &["day", "week", "month", "year"]);
+        let category = pick("category", &["general", "news"]);
+        match self.fetch(query, time_range, category).await {
             Ok(body) => format_results(&body, self.config.results),
             Err(err) => format!("error: {err:#}"),
         }
     }
 
-    async fn fetch(&self, query: &str) -> Result<Value> {
-        let url = reqwest::Url::parse_with_params(
-            &format!("{}/search", self.config.url),
-            [("q", query), ("format", "json")],
-        )
-        .context("invalid SearXNG URL")?;
+    async fn fetch(
+        &self,
+        query: &str,
+        time_range: Option<&str>,
+        category: Option<&str>,
+    ) -> Result<Value> {
+        let params = [("q", Some(query)), ("format", Some("json"))]
+            .into_iter()
+            .chain([("time_range", time_range), ("categories", category)])
+            .filter_map(|(key, value)| Some((key, value?)));
+        let url = reqwest::Url::parse_with_params(&format!("{}/search", self.config.url), params)
+            .context("invalid SearXNG URL")?;
         let mut request = self.client.get(url).header(ACCEPT, "application/json");
         if let Some((user, password)) = &self.config.auth {
             request = request.basic_auth(user, Some(password.as_str()));
@@ -107,7 +134,7 @@ impl WebSearch {
     }
 }
 
-/// The top `limit` results by SearXNG's score, as numbered title / URL / snippet blocks.
+/// The top `limit` results by SearXNG's score, as numbered title / URL (and date) / snippet blocks.
 fn format_results(body: &Value, limit: usize) -> String {
     let score = |r: &&Value| r["score"].as_f64().unwrap_or(0.0);
     let mut results: Vec<&Value> = body["results"]
@@ -121,7 +148,11 @@ fn format_results(body: &Value, limit: usize) -> String {
         .enumerate()
         .map(|(i, r)| {
             let title = r["title"].as_str().unwrap_or("(untitled)").trim();
-            let url = r["url"].as_str().unwrap_or_default();
+            let mut url = r["url"].as_str().unwrap_or_default().to_owned();
+            // `publishedDate` is ISO 8601; the day is enough to judge freshness.
+            if let Some(date) = r["publishedDate"].as_str().and_then(|d| d.get(..10)) {
+                url.push_str(&format!(" · {date}"));
+            }
             let snippet: String = r["content"]
                 .as_str()
                 .unwrap_or_default()
@@ -148,11 +179,14 @@ mod tests {
         let body = json!({"results": [
             {"title": "low", "url": "https://a", "content": "x", "score": 0.5},
             {"title": " high ", "url": "https://b", "content": "y".repeat(400), "score": 2.0},
-            {"title": "mid", "url": "https://c", "score": 1.0},
+            {"title": "mid", "url": "https://c", "score": 1.0, "publishedDate": "2026-10-04T08:00:00"},
         ]});
         let text = format_results(&body, 2);
         assert!(text.starts_with("1. high\n   https://b\n   yyy"), "{text}");
-        assert!(text.contains("2. mid\n   https://c"));
+        assert!(
+            text.contains("2. mid\n   https://c · 2026-10-04\n"),
+            "{text}"
+        );
         assert!(!text.contains("low"));
         assert!(!text.contains(&"y".repeat(MAX_SNIPPET_CHARS + 1)));
         assert_eq!(format_results(&json!({"results": []}), 5), "no results");
@@ -215,6 +249,26 @@ mod tests {
             request
                 .to_lowercase()
                 .contains("authorization: basic bwu6chc="),
+            "{request}"
+        );
+    }
+
+    #[tokio::test]
+    async fn passes_known_time_range_and_category_only() {
+        let (url, server) = one_shot_server("200 OK", r#"{"results":[]}"#).await;
+        let args = json!({"query": "x", "time_range": "week", "category": "news"});
+        assert_eq!(searxng(url, false).run(&args).await, "no results");
+        let request = server.await.expect("server");
+        assert!(
+            request.starts_with("GET /search?q=x&format=json&time_range=week&categories=news "),
+            "{request}"
+        );
+        let (url, server) = one_shot_server("200 OK", r#"{"results":[]}"#).await;
+        let args = json!({"query": "x", "time_range": "decade"});
+        searxng(url, false).run(&args).await;
+        let request = server.await.expect("server");
+        assert!(
+            request.starts_with("GET /search?q=x&format=json "),
             "{request}"
         );
     }
