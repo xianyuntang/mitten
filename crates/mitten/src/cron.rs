@@ -20,30 +20,31 @@ pub fn tool() -> ToolDefinition {
         description: "Schedule a prompt to run on its own later, once or repeatedly; each run \
                       starts a fresh conversation with no history and posts its reply here. \
                       `add` needs `name`, `prompt`, and either `cron` (repeat) or `at` (once). `list` shows \
-                      every job; `remove` deletes one by `id` or `name`. Times are in the user's time zone; \
+                      every job; `remove` deletes one by `id` or `name`; `update` finds one the same way and \
+                      replaces its `prompt`, its timing (`cron` or `at`), or both. Times are in the user's time zone; \
                       the date is in each message's [sent ...] stamp."
             .to_owned(),
         parameters: json!({
             "type": "object",
             "properties": {
-                "action": {"type": "string", "enum": ["add", "list", "remove"]},
+                "action": {"type": "string", "enum": ["add", "list", "remove", "update"]},
                 "name": {
                     "type": "string",
-                    "description": "For add: a short name for the job, in the user's language, e.g. `Morning news`. For remove: the name of the job to delete.",
+                    "description": "For add: a short name for the job, in the user's language, e.g. `Morning news`. For remove and update: the name of the job.",
                 },
                 "prompt": {
                     "type": "string",
-                    "description": "For add: what to do on each run. Make it self-contained; the run won't see this conversation.",
+                    "description": "For add and update: what to do on each run, replacing the old one on update. Make it self-contained; the run won't see this conversation.",
                 },
                 "cron": {
                     "type": "string",
-                    "description": "For add: five-field cron expression (minute hour day month weekday), e.g. `0 9 * * 1-5`.",
+                    "description": "For add and update: five-field cron expression (minute hour day month weekday), e.g. `0 9 * * 1-5`.",
                 },
                 "at": {
                     "type": "string",
-                    "description": "For add: one run at this time, `YYYY-MM-DD HH:MM`.",
+                    "description": "For add and update: one run at this time, `YYYY-MM-DD HH:MM`.",
                 },
-                "id": {"type": "integer", "description": "For remove: the job id from list; wins over `name`."},
+                "id": {"type": "integer", "description": "For remove and update: the job id from list; wins over `name`."},
             },
             "required": ["action"],
         }),
@@ -60,20 +61,49 @@ pub struct NewJob {
     pub next_run: i64,
 }
 
+/// A trimmed, non-empty string argument.
+fn text<'a>(args: &'a Value, key: &str) -> Option<&'a str> {
+    args[key].as_str().map(str::trim).filter(|v| !v.is_empty())
+}
+
 /// Validates an `add` call at time `now`; errors are messages for the model.
 pub fn plan(args: &Value, now: DateTime<Tz>) -> Result<NewJob, String> {
-    let text = |key: &str| args[key].as_str().map(str::trim).filter(|v| !v.is_empty());
-    let name = text("name").ok_or("`name` is required for add")?.to_owned();
-    let prompt = text("prompt")
+    let name = text(args, "name")
+        .ok_or("`name` is required for add")?
+        .to_owned();
+    let prompt = text(args, "prompt")
         .ok_or("`prompt` is required for add")?
         .to_owned();
-    match (text("cron"), text("at")) {
-        (Some(schedule), None) => Ok(NewJob {
-            next_run: next_run(schedule, now)?,
-            schedule: Some(schedule.to_owned()),
-            name,
-            prompt,
-        }),
+    let (schedule, next_run) = timing(args, now)?.ok_or("give exactly one of `cron` or `at`")?;
+    Ok(NewJob {
+        name,
+        schedule,
+        prompt,
+        next_run,
+    })
+}
+
+/// `job` with an `update` call's changes applied at time `now`; errors are messages for the model.
+pub fn revise(job: &Job, args: &Value, now: DateTime<Tz>) -> Result<Job, String> {
+    let prompt = text(args, "prompt");
+    let timing = timing(args, now)?;
+    if prompt.is_none() && timing.is_none() {
+        return Err("update needs a new `prompt`, `cron`, or `at`".to_owned());
+    }
+    let (schedule, next_run) = timing.unwrap_or_else(|| (job.schedule.clone(), job.next_run));
+    Ok(Job {
+        prompt: prompt.map_or_else(|| job.prompt.clone(), str::to_owned),
+        schedule,
+        next_run,
+        ..job.clone()
+    })
+}
+
+/// The `cron` or `at` in `args` as `(schedule, next_run)`, `None` if neither is given.
+fn timing(args: &Value, now: DateTime<Tz>) -> Result<Option<(Option<String>, i64)>, String> {
+    match (text(args, "cron"), text(args, "at")) {
+        (None, None) => Ok(None),
+        (Some(schedule), None) => Ok(Some((Some(schedule.to_owned()), next_run(schedule, now)?))),
         (None, Some(at)) => {
             let naive = NaiveDateTime::parse_from_str(at, AT_FORMAT)
                 .map_err(|err| format!("`at` must look like 2026-10-02 09:00: {err}"))?;
@@ -88,19 +118,23 @@ pub fn plan(args: &Value, now: DateTime<Tz>) -> Result<NewJob, String> {
                     now.format(AT_FORMAT)
                 ));
             }
-            Ok(NewJob {
-                schedule: None,
-                name,
-                prompt,
-                next_run: at.timestamp(),
-            })
+            Ok(Some((None, at.timestamp())))
         }
-        _ => Err("give exactly one of `cron` or `at`".to_owned()),
+        (Some(_), Some(_)) => Err("give only one of `cron` or `at`".to_owned()),
     }
 }
 
-/// The job a `remove` call means: by `id`, or by `name` (ignoring case) when it matches exactly one.
-pub fn target(jobs: &[Job], args: &Value, zone: Tz) -> Result<(i64, String), String> {
+/// When a job with `schedule` and `next` run time fires, for notes.
+pub fn when(schedule: Option<&str>, next: i64, zone: Tz) -> String {
+    match schedule {
+        Some(schedule) => format!("{schedule}, next {}", local_time(next, zone)),
+        None => format!("once at {}", local_time(next, zone)),
+    }
+}
+
+/// The job a `remove` or `update` call means: by `id`, or by `name` (ignoring case) when it matches
+/// exactly one.
+pub fn target<'a>(jobs: &'a [Job], args: &Value, zone: Tz) -> Result<&'a Job, String> {
     let found: Vec<&Job> = if let Some(id) = args["id"].as_i64() {
         jobs.iter().filter(|job| job.id == id).collect()
     } else {
@@ -108,17 +142,17 @@ pub fn target(jobs: &[Job], args: &Value, zone: Tz) -> Result<(i64, String), Str
             .as_str()
             .map(str::trim)
             .filter(|n| !n.is_empty())
-            .ok_or("`id` or `name` is required for remove")?
+            .ok_or("`id` or `name` is required for remove and update")?
             .to_lowercase();
         jobs.iter()
             .filter(|job| job.name.to_lowercase() == name)
             .collect()
     };
     match found.as_slice() {
-        [job] => Ok((job.id, job.name.clone())),
+        [job] => Ok(job),
         [] => Err(format!("no such job\n{}", list(jobs, zone))),
         many => Err(format!(
-            "{} jobs have that name; remove by `id`\n{}",
+            "{} jobs have that name; use `id`\n{}",
             many.len(),
             list(jobs, zone)
         )),
@@ -229,6 +263,38 @@ mod tests {
     }
 
     #[test]
+    fn revise_replaces_prompt_or_timing() {
+        let now = at("2026-10-01 08:30");
+        let job = Job {
+            id: 1,
+            name: "News".to_owned(),
+            target: "discord:1".to_owned(),
+            schedule: Some("0 9 * * *".to_owned()),
+            user: Some(7),
+            prompt: "old".to_owned(),
+            next_run: 42,
+        };
+        let new_prompt = revise(&job, &json!({"prompt": " new "}), now).expect("prompt");
+        assert_eq!(new_prompt.prompt, "new");
+        assert_eq!(
+            (new_prompt.schedule, new_prompt.next_run),
+            (job.schedule.clone(), 42)
+        );
+
+        let once = revise(&job, &json!({"at": "2026-10-02 10:15"}), now).expect("at");
+        assert_eq!(once.prompt, "old");
+        assert_eq!(once.schedule, None);
+        assert_eq!(once.next_run, at("2026-10-02 10:15").timestamp());
+        assert_eq!((once.id, once.user), (1, Some(7)));
+
+        assert!(
+            revise(&job, &json!({"id": 1}), now).is_err(),
+            "nothing to change"
+        );
+        assert!(revise(&job, &json!({"cron": "nope"}), now).is_err());
+    }
+
+    #[test]
     fn target_finds_by_id_or_unique_name() {
         let job = |id, name: &str| Job {
             id,
@@ -240,13 +306,10 @@ mod tests {
             next_run: 0,
         };
         let jobs = [job(1, "News"), job(2, "Rent"), job(3, "rent")];
-        assert_eq!(
-            target(&jobs, &json!({"id": 2}), Tz::UTC),
-            Ok((2, "Rent".to_owned()))
-        );
+        assert_eq!(target(&jobs, &json!({"id": 2}), Tz::UTC), Ok(&jobs[1]));
         assert_eq!(
             target(&jobs, &json!({"name": " news "}), Tz::UTC),
-            Ok((1, "News".to_owned()))
+            Ok(&jobs[0])
         );
         assert!(
             target(&jobs, &json!({"name": "rent"}), Tz::UTC).is_err(),

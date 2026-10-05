@@ -316,6 +316,18 @@ impl Db {
         .await
     }
 
+    /// Saves `job`'s prompt and timing; false if there was none with its id.
+    pub async fn update_job(&self, job: &Job) -> Result<bool> {
+        let job = job.clone();
+        self.with_conn(move |conn| {
+            Ok(conn.execute(
+                "UPDATE jobs SET prompt = ?2, schedule = ?3, next_run = ?4 WHERE id = ?1",
+                params![job.id, job.prompt, job.schedule, job.next_run],
+            )? > 0)
+        })
+        .await
+    }
+
     /// Deletes a job; false if there was none with that id.
     pub async fn remove_job(&self, id: i64) -> Result<bool> {
         self.with_conn(move |conn| {
@@ -469,6 +481,10 @@ mod tests {
         assert_eq!(ids(jobs), [sooner, later]);
         db.set_next_run(later, 5).await.expect("update");
         assert_eq!(ids(db.jobs().await.expect("load")), [later, sooner]);
+        let mut revised = db.jobs().await.expect("load")[1].clone();
+        revised.prompt = "do it better".to_owned();
+        assert!(db.update_job(&revised).await.expect("update"));
+        assert_eq!(db.jobs().await.expect("load")[1], revised);
         assert!(db.remove_job(sooner).await.expect("remove"));
         assert!(!db.remove_job(sooner).await.expect("remove again"));
         assert_eq!(ids(db.jobs().await.expect("load")), [later]);

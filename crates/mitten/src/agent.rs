@@ -249,6 +249,14 @@ fn pretty_name(os_release: &str) -> Option<String> {
     })
 }
 
+/// `text` as a Markdown quote, so a job's instructions stand apart from the note above them.
+fn quote(text: &str) -> String {
+    text.lines()
+        .map(|line| format!("> {line}"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 /// The current time in `zone`, e.g. `2026-10-01 09:00:00 CST Asia/Taipei (UTC+0800), Thursday`.
 fn now(zone: chrono_tz::Tz) -> String {
     chrono::Utc::now()
@@ -378,21 +386,41 @@ impl Agent {
                     Ok(job) => job,
                     Err(problem) => return Ok(format!("error: {problem}")),
                 };
-                let when = match &job.schedule {
-                    Some(schedule) => {
-                        format!("{schedule}, next {}", cron::local_time(job.next_run, zone))
-                    }
-                    None => format!("once at {}", cron::local_time(job.next_run, zone)),
-                };
+                let when = cron::when(job.schedule.as_deref(), job.next_run, zone);
                 let name = job.name.clone();
+                let prompt = quote(&job.prompt);
                 let id = self.db.add_job(self.key.clone(), self.user, job).await?;
-                let note = format!("⏰ scheduled #{id} {name} ({when})");
-                io.note(&note).await?;
+                let note = format!("⏰ scheduled #{id} {name} ({when})\n{prompt}");
+                // A full message, not a note: notes show one line, and the user should see the
+                // instructions the job will run with.
+                io.say(&note).await?;
+                Ok(note)
+            }
+            Some("update") => {
+                let jobs = self.db.jobs().await?;
+                let job = match cron::target(&jobs, args, zone).and_then(|job| {
+                    cron::revise(job, args, chrono::Utc::now().with_timezone(&zone))
+                }) {
+                    Ok(job) => job,
+                    Err(problem) => return Ok(format!("error: {problem}")),
+                };
+                if !self.db.update_job(&job).await? {
+                    return Ok(format!("error: no job #{}", job.id));
+                }
+                let when = cron::when(job.schedule.as_deref(), job.next_run, zone);
+                let note = format!(
+                    "⏰ updated #{} {} ({when})\n{}",
+                    job.id,
+                    job.name,
+                    quote(&job.prompt)
+                );
+                io.say(&note).await?;
                 Ok(note)
             }
             Some("remove") => {
-                let (id, name) = match cron::target(&self.db.jobs().await?, args, zone) {
-                    Ok(found) => found,
+                let jobs = self.db.jobs().await?;
+                let (id, name) = match cron::target(&jobs, args, zone) {
+                    Ok(job) => (job.id, job.name.clone()),
                     Err(problem) => return Ok(format!("error: {problem}")),
                 };
                 if !self.db.remove_job(id).await? {
@@ -403,7 +431,7 @@ impl Agent {
                 Ok(note)
             }
             other => Ok(format!(
-                "error: unknown action {other:?}; use add, list, or remove"
+                "error: unknown action {other:?}; use add, list, remove, or update"
             )),
         }
     }
