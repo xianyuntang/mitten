@@ -417,6 +417,22 @@ impl Agent {
                 io.say(&note).await?;
                 Ok(note)
             }
+            Some("run") => {
+                let jobs = self.db.jobs().await?;
+                let job = match cron::target(&jobs, args, zone) {
+                    Ok(job) => job,
+                    Err(problem) => return Ok(format!("error: {problem}")),
+                };
+                let trial = cron::trial(job, chrono::Utc::now().timestamp());
+                let id = self.db.add_job(job.target.clone(), job.user, trial).await?;
+                let note = format!(
+                    "⏰ trial run of #{} {} starts within a minute as #{id}; its reply posts where \
+                     the job was made",
+                    job.id, job.name
+                );
+                io.note(&note).await?;
+                Ok(note)
+            }
             Some("remove") => {
                 let jobs = self.db.jobs().await?;
                 let (id, name) = match cron::target(&jobs, args, zone) {
@@ -431,7 +447,7 @@ impl Agent {
                 Ok(note)
             }
             other => Ok(format!(
-                "error: unknown action {other:?}; use add, list, remove, or update"
+                "error: unknown action {other:?}; use add, list, remove, update, or run"
             )),
         }
     }

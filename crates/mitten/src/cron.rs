@@ -21,16 +21,17 @@ pub fn tool() -> ToolDefinition {
                       starts a fresh conversation with no history and posts its reply here. \
                       `add` needs `name`, `prompt`, and either `cron` (repeat) or `at` (once). `list` shows \
                       every job; `remove` deletes one by `id` or `name`; `update` finds one the same way and \
-                      replaces its `prompt`, its timing (`cron` or `at`), or both. Times are in the user's time zone; \
+                      replaces its `prompt`, its timing (`cron` or `at`), or both; `run` finds one the same \
+                      way and runs it once now, as a trial, without changing its schedule. Times are in the user's time zone; \
                       the date is in each message's [sent ...] stamp."
             .to_owned(),
         parameters: json!({
             "type": "object",
             "properties": {
-                "action": {"type": "string", "enum": ["add", "list", "remove", "update"]},
+                "action": {"type": "string", "enum": ["add", "list", "remove", "update", "run"]},
                 "name": {
                     "type": "string",
-                    "description": "For add: a short name for the job, in the user's language, e.g. `Morning news`. For remove and update: the name of the job.",
+                    "description": "For add: a short name for the job, in the user's language, e.g. `Morning news`. For remove, update, and run: the name of the job.",
                 },
                 "prompt": {
                     "type": "string",
@@ -44,7 +45,7 @@ pub fn tool() -> ToolDefinition {
                     "type": "string",
                     "description": "For add and update: one run at this time, `YYYY-MM-DD HH:MM`.",
                 },
-                "id": {"type": "integer", "description": "For remove and update: the job id from list; wins over `name`."},
+                "id": {"type": "integer", "description": "For remove, update, and run: the job id from list; wins over `name`."},
             },
             "required": ["action"],
         }),
@@ -124,6 +125,17 @@ fn timing(args: &Value, now: DateTime<Tz>) -> Result<Option<(Option<String>, i64
     }
 }
 
+/// A one-off copy of `job` due at `now`: the scheduler runs it on its next tick, in the job's
+/// conversation with its creator's memory, then deletes it, leaving the original untouched.
+pub fn trial(job: &Job, now: i64) -> NewJob {
+    NewJob {
+        name: format!("{} (trial)", job.name),
+        schedule: None,
+        prompt: job.prompt.clone(),
+        next_run: now,
+    }
+}
+
 /// When a job with `schedule` and `next` run time fires, for notes.
 pub fn when(schedule: Option<&str>, next: i64, zone: Tz) -> String {
     match schedule {
@@ -132,7 +144,7 @@ pub fn when(schedule: Option<&str>, next: i64, zone: Tz) -> String {
     }
 }
 
-/// The job a `remove` or `update` call means: by `id`, or by `name` (ignoring case) when it matches
+/// The job a `remove`, `update`, or `run` call means: by `id`, or by `name` (ignoring case) when it matches
 /// exactly one.
 pub fn target<'a>(jobs: &'a [Job], args: &Value, zone: Tz) -> Result<&'a Job, String> {
     let found: Vec<&Job> = if let Some(id) = args["id"].as_i64() {
@@ -142,7 +154,7 @@ pub fn target<'a>(jobs: &'a [Job], args: &Value, zone: Tz) -> Result<&'a Job, St
             .as_str()
             .map(str::trim)
             .filter(|n| !n.is_empty())
-            .ok_or("`id` or `name` is required for remove and update")?
+            .ok_or("`id` or `name` is required for remove, update, and run")?
             .to_lowercase();
         jobs.iter()
             .filter(|job| job.name.to_lowercase() == name)
@@ -292,6 +304,11 @@ mod tests {
             "nothing to change"
         );
         assert!(revise(&job, &json!({"cron": "nope"}), now).is_err());
+
+        let copy = trial(&job, 100);
+        assert_eq!(copy.name, "News (trial)");
+        assert_eq!((copy.schedule, copy.next_run), (None, 100));
+        assert_eq!(copy.prompt, "old");
     }
 
     #[test]
