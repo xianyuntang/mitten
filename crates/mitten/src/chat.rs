@@ -81,7 +81,7 @@ async fn serve(
     let mut io = ChannelIo(updates.clone());
     while let Some(request) = requests.recv().await {
         let result = match request {
-            Request::Prompt(prompt) => agent.run_turn(&prompt, Vec::new(), &mut io).await,
+            Request::Prompt(prompt) => agent.run_turn(&prompt, Vec::new(), None, &mut io).await,
             Request::Reset => agent.reset().await,
         };
         let done = Update::Done(result.map_err(|err| format!("{err:#}")));

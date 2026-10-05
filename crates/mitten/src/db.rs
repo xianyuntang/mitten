@@ -20,6 +20,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/0006_global_memories.sql"),
     include_str!("../migrations/0007_jobs.sql"),
     include_str!("../migrations/0008_job_names.sql"),
+    include_str!("../migrations/0009_memories_per_user.sql"),
 ];
 
 /// Row of `conversations`.
@@ -91,6 +92,8 @@ pub struct Job {
     pub target: String,
     /// Cron expression; `None` runs once.
     pub schedule: Option<String>,
+    /// Discord user who made it, whose memory its runs load; `None` for the terminal.
+    pub user: Option<u64>,
     pub prompt: String,
     /// Unix seconds.
     pub next_run: i64,
@@ -103,10 +106,18 @@ impl Job {
             name: row.get("name")?,
             target: row.get("target")?,
             schedule: row.get("schedule")?,
+            user: row
+                .get::<_, Option<i64>>("user_id")?
+                .map(i64::cast_unsigned),
             prompt: row.get("prompt")?,
             next_run: row.get("next_run")?,
         })
     }
+}
+
+/// A Discord user ID as SQLite's signed integer; the cast keeps every bit, so it reads back exactly.
+fn sql_user(user: Option<u64>) -> Option<i64> {
+    user.map(u64::cast_signed)
 }
 
 /// Shared handle; every query runs on Tokio's blocking pool.
@@ -225,10 +236,13 @@ impl Db {
 }
 
 impl Db {
-    pub async fn memories(&self) -> Result<Vec<Memory>> {
+    /// `user`'s entries: a Discord user ID, or `None` for the terminal.
+    pub async fn memories(&self, user: Option<u64>) -> Result<Vec<Memory>> {
         self.with_conn(move |conn| {
-            let mut stmt = conn.prepare("SELECT id, content FROM memories ORDER BY id")?;
-            let rows = stmt.query_map([], Memory::from_row)?;
+            // `IS` matches NULL too, so the terminal's entries come back for `None`.
+            let mut stmt =
+                conn.prepare("SELECT id, content FROM memories WHERE user_id IS ?1 ORDER BY id")?;
+            let rows = stmt.query_map(params![sql_user(user)], Memory::from_row)?;
             Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
         })
         .await
@@ -236,20 +250,22 @@ impl Db {
 
     // ponytail: edits are planned against a read taken just before; two processes editing
     // memory at the same instant could overshoot the budget slightly.
-    pub async fn save_memory(&self, edit: Edit) -> Result<()> {
+    /// Applies `edit` to `user`'s entries; ids of someone else's entries match nothing.
+    pub async fn save_memory(&self, user: Option<u64>, edit: Edit) -> Result<()> {
         self.with_conn(move |conn| {
             match edit {
                 Edit::Add(content) => conn.execute(
-                    "INSERT INTO memories (content) VALUES (?1)",
-                    params![content],
+                    "INSERT INTO memories (content, user_id) VALUES (?1, ?2)",
+                    params![content, sql_user(user)],
                 )?,
                 Edit::Replace(id, content) => conn.execute(
-                    "UPDATE memories SET content = ?2 WHERE id = ?1",
-                    params![id, content],
+                    "UPDATE memories SET content = ?2 WHERE id = ?1 AND user_id IS ?3",
+                    params![id, content, sql_user(user)],
                 )?,
-                Edit::Remove(id) => {
-                    conn.execute("DELETE FROM memories WHERE id = ?1", params![id])?
-                }
+                Edit::Remove(id) => conn.execute(
+                    "DELETE FROM memories WHERE id = ?1 AND user_id IS ?2",
+                    params![id, sql_user(user)],
+                )?,
             };
             Ok(())
         })
@@ -260,7 +276,8 @@ impl Db {
     pub async fn jobs(&self) -> Result<Vec<Job>> {
         self.with_conn(move |conn| {
             let mut stmt = conn.prepare(
-                "SELECT id, name, target, schedule, prompt, next_run FROM jobs ORDER BY next_run, id",
+                "SELECT id, name, target, schedule, prompt, next_run, user_id FROM jobs
+                 ORDER BY next_run, id",
             )?;
             let rows = stmt.query_map([], Job::from_row)?;
             Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
@@ -269,12 +286,19 @@ impl Db {
     }
 
     /// Stores a job that posts to the conversation `target` and returns its id.
-    pub async fn add_job(&self, target: String, job: NewJob) -> Result<i64> {
+    pub async fn add_job(&self, target: String, user: Option<u64>, job: NewJob) -> Result<i64> {
         self.with_conn(move |conn| {
             conn.execute(
-                "INSERT INTO jobs (name, target, schedule, prompt, next_run)
-                 VALUES (?1, ?2, ?3, ?4, ?5)",
-                params![job.name, target, job.schedule, job.prompt, job.next_run],
+                "INSERT INTO jobs (name, target, schedule, prompt, next_run, user_id)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![
+                    job.name,
+                    target,
+                    job.schedule,
+                    job.prompt,
+                    job.next_run,
+                    sql_user(user)
+                ],
             )?;
             Ok(conn.last_insert_rowid())
         })
@@ -378,33 +402,43 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn memories_round_trip() {
+    async fn memories_round_trip_per_user() {
         let db = Db::open_in_memory().expect("open");
-        db.save_memory(Edit::Add("a".to_owned()))
-            .await
-            .expect("add");
-        db.save_memory(Edit::Add("b".to_owned()))
-            .await
-            .expect("add");
-        let ids: Vec<i64> = db
-            .memories()
-            .await
-            .expect("load")
-            .iter()
-            .map(|m| m.id)
-            .collect();
-        db.save_memory(Edit::Replace(ids[0], "a2".to_owned()))
+        let contents = |user| {
+            let db = db.clone();
+            async move {
+                db.memories(user)
+                    .await
+                    .expect("load")
+                    .into_iter()
+                    .map(|m| (m.id, m.content))
+                    .collect::<Vec<_>>()
+            }
+        };
+        for (user, text) in [(None, "a"), (None, "b"), (Some(7), "mine")] {
+            db.save_memory(user, Edit::Add(text.to_owned()))
+                .await
+                .expect("add");
+        }
+        let terminal = contents(None).await;
+        let mine = contents(Some(7)).await;
+        assert_eq!(mine.len(), 1);
+        assert!(contents(Some(8)).await.is_empty());
+
+        db.save_memory(None, Edit::Replace(terminal[0].0, "a2".to_owned()))
             .await
             .expect("replace");
-        db.save_memory(Edit::Remove(ids[1])).await.expect("remove");
-        let contents: Vec<String> = db
-            .memories()
+        db.save_memory(None, Edit::Remove(terminal[1].0))
             .await
-            .expect("load")
-            .into_iter()
-            .map(|m| m.content)
-            .collect();
-        assert_eq!(contents, ["a2"]);
+            .expect("remove");
+        // Someone else's entry id changes nothing.
+        db.save_memory(Some(8), Edit::Remove(mine[0].0))
+            .await
+            .expect("remove");
+        let texts =
+            |entries: Vec<(i64, String)>| entries.into_iter().map(|e| e.1).collect::<Vec<_>>();
+        assert_eq!(texts(contents(None).await), ["a2"]);
+        assert_eq!(texts(contents(Some(7)).await), ["mine"]);
     }
 
     #[tokio::test]
@@ -417,16 +451,21 @@ mod tests {
         };
         let db = Db::open_in_memory().expect("open");
         let later = db
-            .add_job("discord:1".to_owned(), job("a", Some("0 9 * * *"), 20))
+            .add_job(
+                "discord:1".to_owned(),
+                Some(7),
+                job("a", Some("0 9 * * *"), 20),
+            )
             .await
             .expect("add");
         let sooner = db
-            .add_job("discord:1".to_owned(), job("b", None, 10))
+            .add_job("discord:1".to_owned(), None, job("b", None, 10))
             .await
             .expect("add");
         let ids = |jobs: Vec<Job>| jobs.into_iter().map(|j| j.id).collect::<Vec<_>>();
         let jobs = db.jobs().await.expect("load");
         assert_eq!(jobs[0].name, "b");
+        assert_eq!((jobs[0].user, jobs[1].user), (None, Some(7)));
         assert_eq!(ids(jobs), [sooner, later]);
         db.set_next_run(later, 5).await.expect("update");
         assert_eq!(ids(db.jobs().await.expect("load")), [later, sooner]);

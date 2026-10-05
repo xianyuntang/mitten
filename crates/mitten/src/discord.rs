@@ -59,6 +59,8 @@ enum Input {
         attachments: Vec<Attachment>,
         origin: ChannelId,
         message: MessageId,
+        /// Discord user who sent it; their memory is the one the turn uses.
+        author: u64,
     },
     /// A Run or Deny click on the approval message `message`.
     Decision { message: MessageId, run: bool },
@@ -161,7 +163,7 @@ async fn run_job(config: Config, db: Db, mcp: Arc<Mcp>, http: Arc<Http>, job: Jo
         // The last run's transcript stays on disk until the next one starts.
         agent.reset().await?;
         agent
-            .run_turn(&cron::prompt(&job), Vec::new(), &mut io)
+            .run_turn(&cron::prompt(&job), Vec::new(), job.user, &mut io)
             .await
     };
     if let Err(err) = run.await {
@@ -283,6 +285,7 @@ impl EventHandler for Handler {
             attachments,
             origin: msg.channel_id,
             message: msg.id,
+            author: msg.author.id.get(),
         };
         self.deliver(&ctx.http, channel, input);
     }
@@ -382,14 +385,21 @@ async fn run_channel(
             mut attachments,
             origin,
             message,
+            author,
         } = input
         else {
             continue; // A click on an approval that already timed out.
         };
         let mut messages = vec![(origin, message)];
         if content.trim() != "/new" {
-            next =
-                merge_waiting(&mut io.inbox, &mut content, &mut attachments, &mut messages).await;
+            next = merge_waiting(
+                &mut io.inbox,
+                author,
+                &mut content,
+                &mut attachments,
+                &mut messages,
+            )
+            .await;
         }
         let prompt = content.trim();
         if prompt.is_empty() && attachments.is_empty() {
@@ -412,7 +422,9 @@ async fn run_channel(
         let result = match download(&io.web, &attachments).await {
             Ok((text, images)) => {
                 let prompt = format!("{prompt}{text}");
-                agent.run_turn(prompt.trim(), images, &mut io).await
+                agent
+                    .run_turn(prompt.trim(), images, Some(author), &mut io)
+                    .await
             }
             Err(err) => Err(err),
         };
@@ -429,10 +441,11 @@ async fn run_channel(
 
 /// Folds text messages into one prompt until `inbox` stays quiet for `MERGE_QUIET` or `MERGE_CAP`
 /// passes, so a burst,
-/// or messages sent while a turn ran, is answered once. Stops at a `/new`, which is returned to
-/// run after this prompt.
+/// or messages sent while a turn ran, is answered once. Stops at a `/new` or at a message from
+/// someone other than `author`, which is returned to run after this prompt.
 async fn merge_waiting(
     inbox: &mut mpsc::UnboundedReceiver<Input>,
+    author: u64,
     content: &mut String,
     attachments: &mut Vec<Attachment>,
     messages: &mut Vec<(ChannelId, MessageId)>,
@@ -448,16 +461,19 @@ async fn merge_waiting(
             attachments: more_attachments,
             origin,
             message,
+            author: sender,
         } = input
         else {
             continue;
         };
-        if more.trim() == "/new" {
+        // Each turn has one sender, so it loads one person's memory.
+        if more.trim() == "/new" || sender != author {
             return Some(Input::Text {
                 content: more,
                 attachments: more_attachments,
                 origin,
                 message,
+                author: sender,
             });
         }
         content.push('\n');
@@ -744,6 +760,7 @@ mod tests {
             attachments: Vec::new(),
             origin: ChannelId::new(1),
             message: MessageId::new(id),
+            author: 7,
         };
         let (tx, mut rx) = mpsc::unbounded_channel();
         for input in [
@@ -762,11 +779,32 @@ mod tests {
         let mut content = "a".to_owned();
         let mut attachments = Vec::new();
         let mut messages = vec![(ChannelId::new(1), MessageId::new(1))];
-        let next = merge_waiting(&mut rx, &mut content, &mut attachments, &mut messages).await;
+        let next = merge_waiting(&mut rx, 7, &mut content, &mut attachments, &mut messages).await;
         assert_eq!(content, "a\nb\nc");
         assert_eq!(messages.len(), 3);
         assert!(matches!(next, Some(Input::Text { message, .. }) if message == MessageId::new(4)));
         assert!(matches!(rx.try_recv(), Ok(Input::Text { content, .. }) if content == "d"));
+    }
+
+    #[tokio::test]
+    async fn merge_waiting_stops_at_another_sender() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        for (author, id) in [(7, 2), (8, 3)] {
+            let input = Input::Text {
+                content: "more".to_owned(),
+                attachments: Vec::new(),
+                origin: ChannelId::new(1),
+                message: MessageId::new(id),
+                author,
+            };
+            tx.send(input).unwrap();
+        }
+        drop(tx);
+        let mut content = "a".to_owned();
+        let mut messages = Vec::new();
+        let next = merge_waiting(&mut rx, 7, &mut content, &mut Vec::new(), &mut messages).await;
+        assert_eq!(content, "a\nmore");
+        assert!(matches!(next, Some(Input::Text { author: 8, .. })));
     }
 
     #[tokio::test]
@@ -779,6 +817,7 @@ mod tests {
                     attachments: Vec::new(),
                     origin: ChannelId::new(1),
                     message: MessageId::new(id),
+                    author: 7,
                 };
                 if tx.send(input).is_err() {
                     break;
@@ -789,7 +828,7 @@ mod tests {
         let start = tokio::time::Instant::now();
         let mut content = String::new();
         let mut messages = Vec::new();
-        merge_waiting(&mut rx, &mut content, &mut Vec::new(), &mut messages).await;
+        merge_waiting(&mut rx, 7, &mut content, &mut Vec::new(), &mut messages).await;
         assert!(start.elapsed() < MERGE_CAP + MERGE_QUIET / 2);
         assert!(messages.len() >= 2);
     }

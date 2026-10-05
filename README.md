@@ -64,7 +64,9 @@ How it behaves:
 
 - Only the user IDs you list are heard; everyone else is ignored.
 - A message in a server channel opens a thread, and each thread is its own conversation.
-  Memory is shared by every conversation, terminal included. Idle threads archive after an hour.
+  Idle threads archive after an hour.
+- Each person has their own memory, shared by all of their threads and DMs; the terminal has one
+  of its own. Messages from different people are never merged into one turn.
 - 👀 means received, ✅ done, ❌ failed. `/new` starts over in that channel or thread.
 - Messages sent in quick succession, or while mitten is still answering, are merged and answered
   once.
@@ -97,7 +99,7 @@ Logs:
 | `read_file`, `list_dir` | Reads files and lists directories. Hidden paths (like `~/.ssh` or `.env`) and Mitten's own config and database are refused. | No |
 | `fetch_url` | Reads a web page as text, optionally rendered in headless Chrome. Private network addresses are refused. | No |
 | `web_search` | Searches through your SearXNG instance, optionally only recent results (`time_range`) or news sites (`category`). Results show their publish date when known. | No |
-| `memory` | Saves short notes that load into later conversations. | No |
+| `memory` | Saves short notes about the person talking, loaded into their later conversations. | No |
 | `cron` | Schedules a named prompt to run later, once (`at`) or on a cron expression, in the config's `timezone` (default: this machine's; restart `mitten serve` after changing it). Each run starts a fresh conversation and posts its reply in the Discord channel or thread where the job was made. Discord only; jobs run while `mitten serve` is up, and a run missed while it was down happens once on startup. Approval prompts during a run are denied unless approval is set to auto. | No |
 | `settings` | Reads or changes the model and a few limits. | Yes |
 | MCP tools | Any tool from the MCP servers you connect. | Yes, per server |

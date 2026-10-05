@@ -1,5 +1,6 @@
-//! Long-term memory: short facts the agent saves itself, shared by every conversation (the terminal
-//! and every Discord channel) and loaded before every turn, so it survives `/new`.
+//! Long-term memory: short facts the agent saves itself, one set per person (each Discord user, and
+//! the terminal), shared by all of that person's conversations and loaded before every turn, so it
+//! survives `/new`.
 
 use serde_json::{Value, json};
 
@@ -7,15 +8,16 @@ use rig_core::completion::ToolDefinition;
 
 use crate::db::Memory;
 
-/// Total characters across all entries; everything here rides along in every request.
+/// Total characters across one person's entries; everything here rides along in every request.
 // ponytail: fixed budget; make it configurable if people hit it.
 pub const CHAR_LIMIT: usize = 2_200;
 
 /// Stable guidance for the system prompt; the entries themselves come from `snapshot`.
 pub const GUIDANCE: &str = "\
 # Memory
-You have long-term memory shared by every conversation (the terminal and every Discord channel); \
-it survives /new and is reloaded before every message. \
+You have long-term memory about the person sending the current message, shared by all of their \
+conversations; each person has their own, and others never see it. It survives /new and is \
+reloaded before every message. \
 Save with the memory tool facts that matter from now on: who you are talking to, their \
 preferences, names or roles they give you, stable facts about this machine, standing conventions. \
 When the user asks you to remember something, or tells you such a fact, call the memory tool in \
@@ -37,7 +39,8 @@ pub fn tool() -> ToolDefinition {
     ToolDefinition {
         name: "memory".to_owned(),
         description: format!(
-            "Add, replace, or remove a long-term memory entry, shared by every conversation. Entries \
+            "Add, replace, or remove a long-term memory entry about the person sending the current message, \
+             shared by all of their conversations. Entries \
              load before every message, so keep them short and high-signal. Total budget: {CHAR_LIMIT} characters."
         ),
         parameters: json!({

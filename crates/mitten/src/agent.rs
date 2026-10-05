@@ -189,9 +189,10 @@ When the obvious interpretation is clear, act; ask only when the ambiguity chang
 /// only changes the tail. Rebuilt before every turn, so memory saved in any conversation shows up
 /// on the next message everywhere; the text only changes when memory or settings do.
 /// Web search and Claude Code guidance are added when those tools are configured.
-async fn system_prompt(db: &Db, key: &str, config: &Config) -> Result<String> {
+/// `user` picks whose memory loads: a Discord user ID, or `None` for the terminal.
+async fn system_prompt(db: &Db, key: &str, config: &Config, user: Option<u64>) -> Result<String> {
     let cwd = std::env::current_dir().context("failed to read current directory")?;
-    let memories = db.memories().await.context("failed to load memory")?;
+    let memories = db.memories(user).await.context("failed to load memory")?;
     let mut tools = if config.searxng.is_some() {
         format!("{}\n\n", search::GUIDANCE)
     } else {
@@ -306,6 +307,8 @@ pub struct Agent {
     /// Shared by every conversation in the process.
     mcp: Arc<Mcp>,
     key: String,
+    /// Who sent the current turn: a Discord user ID, or `None` for the terminal. Picks the memory.
+    user: Option<u64>,
     system: String,
     messages: Vec<Message>,
 }
@@ -321,7 +324,7 @@ impl Agent {
             .map(|row| serde_json::from_value(row.content))
             .collect::<Result<Vec<Message>, _>>()
             .context("stored conversation is unreadable; send /new to start over")?;
-        let system = system_prompt(&db, key, &config).await?;
+        let system = system_prompt(&db, key, &config, None).await?;
         let search = config.searxng.clone().map(WebSearch::new).transpose()?;
         Ok(Self {
             model: Model::new(&config, &format!("mitten-{}", conversation.id))?,
@@ -333,6 +336,7 @@ impl Agent {
             fetcher: Fetcher::new()?,
             mcp,
             key: key.to_owned(),
+            user: None,
             system,
             messages,
         })
@@ -344,16 +348,16 @@ impl Agent {
 
     /// Validates and applies one memory tool call; problems go back to the model as text.
     async fn remember(&self, args: &Value, io: &mut impl Io) -> Result<String> {
-        let entries = self.db.memories().await?;
+        let entries = self.db.memories(self.user).await?;
         let (edit, used) = match memory::plan(&entries, args) {
             Ok(planned) => planned,
             Err(problem) => return Ok(format!("error: {problem}")),
         };
         let note = memory::describe(&edit, &entries);
-        self.db.save_memory(edit).await?;
+        self.db.save_memory(self.user, edit).await?;
         io.note(&note).await?;
         Ok(format!(
-            "saved; memory uses {used}/{} characters. Every conversation sees it from its next message.",
+            "saved; memory uses {used}/{} characters. Every conversation with this person sees it from its next message.",
             memory::CHAR_LIMIT
         ))
     }
@@ -381,7 +385,7 @@ impl Agent {
                     None => format!("once at {}", cron::local_time(job.next_run, zone)),
                 };
                 let name = job.name.clone();
-                let id = self.db.add_job(self.key.clone(), job).await?;
+                let id = self.db.add_job(self.key.clone(), self.user, job).await?;
                 let note = format!("⏰ scheduled #{id} {name} ({when})");
                 io.note(&note).await?;
                 Ok(note)
@@ -504,15 +508,18 @@ impl Agent {
     /// Runs one user turn to completion, looping while the model calls tools, then saves it.
     /// On failure the turn is cut back to its last complete tool round so the history stays valid;
     /// rounds whose commands already ran are kept, so the model knows what changed.
-    /// `images` go to the model alongside `prompt`.
+    /// `images` go to the model alongside `prompt`. `user` sent it: a Discord user ID, or `None`
+    /// for the terminal; their memory is the one loaded and edited.
     pub async fn run_turn(
         &mut self,
         prompt: &str,
         images: Vec<Image>,
+        user: Option<u64>,
         io: &mut impl Io,
     ) -> Result<()> {
         self.reload()?;
-        self.system = system_prompt(&self.db, &self.key, &self.config).await?;
+        self.user = user;
+        self.system = system_prompt(&self.db, &self.key, &self.config, user).await?;
         self.compact_if_needed(prompt, io).await?;
         let turn_start = self.messages.len();
         let result = match self.reviewer.clone() {

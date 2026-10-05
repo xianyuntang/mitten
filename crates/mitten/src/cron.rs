@@ -235,6 +235,7 @@ mod tests {
             name: name.to_owned(),
             target: "discord:1".to_owned(),
             schedule: None,
+            user: None,
             prompt: "p".to_owned(),
             next_run: 0,
         };
