@@ -1,6 +1,8 @@
 //! `web_search` tool: queries a user-hosted SearXNG instance through its JSON API.
 
-use std::time::Duration;
+use std::collections::HashMap;
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use reqwest::StatusCode;
@@ -13,6 +15,8 @@ use crate::config::Searxng;
 const TIMEOUT: Duration = Duration::from_secs(15);
 /// Snippet characters kept per result; titles and URLs are kept whole.
 const MAX_SNIPPET_CHARS: usize = 300;
+/// How long a search's results are reused for the same search, sparing SearXNG's upstream engines.
+const CACHE_TTL: Duration = Duration::from_secs(600);
 
 /// System prompt section, included only when `web_search` is available.
 pub const GUIDANCE: &str = "\
@@ -20,8 +24,9 @@ pub const GUIDANCE: &str = "\
 Before answering any question that asks for facts, news, prices, versions, docs, \
 recommendations, or anything that may have changed, call web_search first, even if you think you \
 already know the answer; your memory may be outdated. Skip it only for small talk, thanks, or \
-tasks that are purely about local files, memory, or settings. Search several times before \
-answering; one search is rarely enough. Start broad, then rephrase: different keywords and synonyms, more specific \
+tasks that are purely about local files, memory, or settings. Most questions need 2 to 4 \
+searches: stop once the results answer the question, and search more only when they are thin or \
+disagree. Start broad, then rephrase: different keywords and synonyms, more specific \
 terms (names, versions, error messages, dates), both English and the user's language, and \
 site:domain or \"exact phrase\" to target good sources. Compare what the results say and prefer \
 official or primary sources. For news or anything recent, set time_range (day, week, month, \
@@ -29,7 +34,7 @@ year) and category news, and check each result's date against today's. For a spe
 or span (\"last Wednesday\", \"in June\"), work out the dates from today's and set after and before \
 instead. For figures on a given date (prices, rates, weather, results), prefer the primary source \
 that publishes them (an exchange, central bank, or agency) and read it with fetch_url over news \
-snippets. If results are thin or disagree, keep searching with new queries \
+snippets. If results are still thin or disagree, search again with new queries \
 instead of guessing. Snippets are short excerpts; when you need a page's details or the snippets \
 look thin, read the most promising results with fetch_url. Name the URLs your answer relies on.";
 
@@ -38,7 +43,7 @@ pub fn tool() -> ToolDefinition {
         name: "web_search".to_owned(),
         description: "Search the web for current information. Returns titles, URLs, and snippets. \
                       Operators like site:example.com and \"exact phrase\" usually work. \
-                      Call it several times with rephrased queries rather than relying on one."
+                      Rephrase rather than repeat a query; the same search again returns the earlier results."
             .to_owned(),
         parameters: json!({
             "type": "object",
@@ -72,6 +77,9 @@ pub fn tool() -> ToolDefinition {
 pub struct WebSearch {
     client: reqwest::Client,
     config: Searxng,
+    /// Formatted results by search, with when they were fetched.
+    // ponytail: in memory, per conversation; share across conversations if repeats span them.
+    cache: Mutex<HashMap<String, (Instant, String)>>,
 }
 
 impl WebSearch {
@@ -81,7 +89,11 @@ impl WebSearch {
             .user_agent(concat!("mitten/", env!("CARGO_PKG_VERSION")))
             .build()
             .context("failed to build HTTP client")?;
-        Ok(Self { client, config })
+        Ok(Self {
+            client,
+            config,
+            cache: Mutex::default(),
+        })
     }
 
     /// Runs one tool call; failures come back as text for the model.
@@ -114,10 +126,28 @@ impl WebSearch {
             category = Some("general");
             format!("{query} {dates}")
         };
+        let key = format!("{query}\n{time_range:?}\n{category:?}");
+        if let Some(results) = self.cached(&key) {
+            return format!("(same search as before, results reused)\n{results}");
+        }
         match self.fetch(&query, time_range, category).await {
-            Ok(body) => format_results(&body, self.config.results),
+            Ok(body) => {
+                let results = format_results(&body, self.config.results);
+                if let Ok(mut cache) = self.cache.lock() {
+                    cache.retain(|_, (at, _)| at.elapsed() < CACHE_TTL);
+                    cache.insert(key, (Instant::now(), results.clone()));
+                }
+                results
+            }
             Err(err) => format!("error: {err:#}"),
         }
+    }
+
+    /// Results of the same search made within `CACHE_TTL`.
+    fn cached(&self, key: &str) -> Option<String> {
+        let cache = self.cache.lock().ok()?;
+        let (at, results) = cache.get(key)?;
+        (at.elapsed() < CACHE_TTL).then(|| results.clone())
     }
 
     async fn fetch(
@@ -335,6 +365,31 @@ mod tests {
             .run(&bad)
             .await;
         assert!(out.contains("`after` must be a date"), "{out}");
+    }
+
+    #[tokio::test]
+    async fn repeated_search_is_served_from_cache() {
+        let (url, _server) = one_shot_server(
+            "200 OK",
+            r#"{"results":[{"title":"t","url":"https://u","content":"c"}]}"#,
+        )
+        .await;
+        let search = searxng(url, false);
+        assert_eq!(
+            search.run(&json!({"query": "x"})).await,
+            "1. t\n   https://u\n   c"
+        );
+        // The one-shot server is gone, so this answer can only come from the cache.
+        let again = search.run(&json!({"query": " x "})).await;
+        assert!(again.starts_with("(same search as before"), "{again}");
+        assert!(again.ends_with("1. t\n   https://u\n   c"), "{again}");
+        let other = search
+            .run(&json!({"query": "x", "time_range": "day"}))
+            .await;
+        assert!(
+            other.starts_with("error:"),
+            "different parameters miss: {other}"
+        );
     }
 
     #[tokio::test]
