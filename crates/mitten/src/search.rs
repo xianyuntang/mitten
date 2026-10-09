@@ -25,7 +25,11 @@ answering; one search is rarely enough. Start broad, then rephrase: different ke
 terms (names, versions, error messages, dates), both English and the user's language, and \
 site:domain or \"exact phrase\" to target good sources. Compare what the results say and prefer \
 official or primary sources. For news or anything recent, set time_range (day, week, month, \
-year) and category news, and check each result's date against today's. If results are thin or disagree, keep searching with new queries \
+year) and category news, and check each result's date against today's. For a specific past date \
+or span (\"last Wednesday\", \"in June\"), work out the dates from today's and set after and before \
+instead. For figures on a given date (prices, rates, weather, results), prefer the primary source \
+that publishes them (an exchange, central bank, or agency) and read it with fetch_url over news \
+snippets. If results are thin or disagree, keep searching with new queries \
 instead of guessing. Snippets are short excerpts; when you need a page's details or the snippets \
 look thin, read the most promising results with fetch_url. Name the URLs your answer relies on.";
 
@@ -49,6 +53,14 @@ pub fn tool() -> ToolDefinition {
                     "type": "string",
                     "enum": ["general", "news"],
                     "description": "news searches news sites; default general.",
+                },
+                "after": {
+                    "type": "string",
+                    "description": "Only results published on or after this date, YYYY-MM-DD. Approximate; overrides time_range and category.",
+                },
+                "before": {
+                    "type": "string",
+                    "description": "Only results published before this date, YYYY-MM-DD. Approximate; overrides time_range and category.",
                 },
             },
             "required": ["query"],
@@ -87,9 +99,22 @@ impl WebSearch {
                 .as_str()
                 .and_then(|v| allowed.iter().find(|a| **a == v).copied())
         };
-        let time_range = pick("time_range", &["day", "week", "month", "year"]);
-        let category = pick("category", &["general", "news"]);
-        match self.fetch(query, time_range, category).await {
+        let mut time_range = pick("time_range", &["day", "week", "month", "year"]);
+        let mut category = pick("category", &["general", "news"]);
+        let dates = match date_operators(args) {
+            Ok(dates) => dates,
+            Err(problem) => return format!("error: {problem}"),
+        };
+        let query = if dates.is_empty() {
+            query.to_owned()
+        } else {
+            // SearXNG has no date range; Google reads these from the query. News engines (Bing)
+            // return nothing with them, so the search goes to general engines only.
+            time_range = None;
+            category = Some("general");
+            format!("{query} {dates}")
+        };
+        match self.fetch(&query, time_range, category).await {
             Ok(body) => format_results(&body, self.config.results),
             Err(err) => format!("error: {err:#}"),
         }
@@ -132,6 +157,20 @@ impl WebSearch {
             .await
             .context("SearXNG did not return JSON; is `json` in search.formats?")
     }
+}
+
+/// `after:` / `before:` query operators from the call's dates, empty if neither is given.
+fn date_operators(args: &Value) -> std::result::Result<String, String> {
+    let mut operators = Vec::new();
+    for key in ["after", "before"] {
+        let Some(text) = args[key].as_str().map(str::trim).filter(|t| !t.is_empty()) else {
+            continue;
+        };
+        let date = chrono::NaiveDate::parse_from_str(text, "%Y-%m-%d")
+            .map_err(|_| format!("`{key}` must be a date like 2026-09-30, not {text:?}"))?;
+        operators.push(format!("{key}:{date}"));
+    }
+    Ok(operators.join(" "))
 }
 
 /// The top `limit` results by SearXNG's score, as numbered title / URL (and date) / snippet blocks.
@@ -271,6 +310,31 @@ mod tests {
             request.starts_with("GET /search?q=x&format=json "),
             "{request}"
         );
+    }
+
+    #[tokio::test]
+    async fn dates_become_query_operators_on_general_engines() {
+        let (url, server) = one_shot_server("200 OK", r#"{"results":[]}"#).await;
+        let args = json!({
+            "query": "taiex",
+            "after": "2026-09-29",
+            "before": "2026-10-01",
+            "category": "news",
+            "time_range": "week",
+        });
+        searxng(url, false).run(&args).await;
+        let request = server.await.expect("server");
+        assert!(
+            request.starts_with(
+                "GET /search?q=taiex+after%3A2026-09-29+before%3A2026-10-01&format=json&categories=general "
+            ),
+            "{request}"
+        );
+        let bad = json!({"query": "x", "after": "yesterday"});
+        let out = searxng("http://127.0.0.1:1".to_owned(), false)
+            .run(&bad)
+            .await;
+        assert!(out.contains("`after` must be a date"), "{out}");
     }
 
     #[tokio::test]
