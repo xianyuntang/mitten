@@ -105,6 +105,7 @@ struct ToolsSection {
     #[serde(default, rename = "bash")]
     _bash: Option<serde::de::IgnoredAny>,
     searxng: Option<SearxngSection>,
+    brave: Option<BraveSection>,
     claude_code: Option<ClaudeCodeSection>,
 }
 
@@ -209,6 +210,55 @@ impl SearxngSection {
             auth,
             results: self.results,
         })
+    }
+}
+
+/// `[tools.brave]`: the Brave Search API for the `web_search` tool.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BraveSection {
+    api_key: Secret,
+    #[serde(default = "SearxngSection::default_results")]
+    results: usize,
+}
+
+impl BraveSection {
+    fn validate(self) -> Result<Brave> {
+        if self.api_key.as_str().trim().is_empty() {
+            bail!("tools.brave.api_key is empty");
+        }
+        if !(1..=20).contains(&self.results) {
+            bail!("tools.brave.results must be between 1 and 20");
+        }
+        Ok(Brave {
+            api_key: self.api_key,
+            results: self.results,
+        })
+    }
+}
+
+/// Validated `[tools.brave]`.
+#[derive(Debug, Clone)]
+pub struct Brave {
+    pub api_key: Secret,
+    /// How many results `web_search` returns.
+    pub results: usize,
+}
+
+/// Where `web_search` searches: one provider, picked in the config.
+#[derive(Debug, Clone)]
+pub enum Search {
+    Searxng(Searxng),
+    Brave(Brave),
+}
+
+impl Search {
+    /// How many results `web_search` returns.
+    pub fn results(&self) -> usize {
+        match self {
+            Self::Searxng(searxng) => searxng.results,
+            Self::Brave(brave) => brave.results,
+        }
     }
 }
 
@@ -347,7 +397,7 @@ pub struct Config {
     /// OpenCode Go base URL, e.g. `https://opencode.ai/zen/go/v1`.
     pub base_url: String,
     /// Enables the `web_search` tool when set.
-    pub searxng: Option<Searxng>,
+    pub search: Option<Search>,
     /// Enables the `claude_code` tool when set.
     pub claude_code: Option<ClaudeCode>,
     /// MCP servers by name.
@@ -430,11 +480,14 @@ impl Config {
             compact_at_tokens,
             api_key: file.opencode_go.api_key,
             base_url: base_url.trim_end_matches('/').to_owned(),
-            searxng: file
-                .tools
-                .searxng
-                .map(SearxngSection::validate)
-                .transpose()?,
+            search: match (file.tools.searxng, file.tools.brave) {
+                (Some(_), Some(_)) => {
+                    bail!("set only one of [tools.searxng] and [tools.brave] for web search")
+                }
+                (Some(searxng), None) => Some(Search::Searxng(searxng.validate()?)),
+                (None, Some(brave)) => Some(Search::Brave(brave.validate()?)),
+                (None, None) => None,
+            },
             claude_code: file
                 .tools
                 .claude_code
@@ -601,7 +654,9 @@ mod tests {
             "{base}url = \"https://search.example.com/\"\nusername = \"me\"\npassword = \"pw\""
         ))
         .expect("valid");
-        let searxng = config.searxng.expect("configured");
+        let Some(Search::Searxng(searxng)) = config.search else {
+            panic!("searxng configured");
+        };
         assert_eq!(searxng.url, "https://search.example.com");
         assert_eq!(searxng.results, 5);
         assert_eq!(searxng.auth.map(|(user, _)| user).as_deref(), Some("me"));
@@ -619,6 +674,28 @@ mod tests {
         assert!(Config::parse(&format!("{base}url = \"http://x\"\nusername = \"me\"")).is_err());
         assert!(Config::parse(&format!("{base}url = \"x\"")).is_err());
         assert!(Config::parse(&format!("{base}url = \"http://x\"\nresults = 0")).is_err());
+    }
+
+    #[test]
+    fn brave_section_parses_and_excludes_searxng() {
+        let base = "[opencode-go]\napi_key = \"k\"\n";
+        let config = Config::parse(&format!(
+            "{base}[tools.brave]\napi_key = \"bk\"\nresults = 8\n"
+        ))
+        .expect("valid");
+        let Some(Search::Brave(brave)) = &config.search else {
+            panic!("brave configured");
+        };
+        assert_eq!((brave.api_key.as_str(), brave.results), ("bk", 8));
+        assert!(!format!("{config:?}").contains("\"bk\""));
+        assert!(Config::parse(&format!("{base}[tools.brave]\napi_key = \" \"\n")).is_err());
+        assert!(
+            Config::parse(&format!(
+                "{base}[tools.brave]\napi_key = \"bk\"\n[tools.searxng]\nurl = \"http://x\"\n"
+            ))
+            .is_err(),
+            "only one search provider"
+        );
     }
 
     #[test]

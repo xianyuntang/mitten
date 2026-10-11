@@ -24,13 +24,21 @@ api_key = "your-opencode-api-key"
 # Optional. ".../messages" is appended.
 # base_url = "https://opencode.ai/zen/go/v1"
 
-# Optional. Enables the `web_search` tool through your SearXNG instance.
-# Its settings.yml must list `json` under search.formats, or searches get HTTP 403.
+# Optional. Enables the `web_search` tool through your SearXNG instance, or through the Brave
+# Search API below; set only one. SearXNG's settings.yml must list `json` under search.formats,
+# or searches get HTTP 403.
 # [tools.searxng]
 # url = "https://search.example.com"
 # # Optional basic auth; set both or neither. Use https so the password isn't sent in the clear.
 # username = "me"
 # password = "secret"
+# # Optional. Results per search, 1-20. Default 5.
+# results = 5
+
+# Optional. Enables the `web_search` tool through the Brave Search API instead of SearXNG.
+# Get a key at https://api-dashboard.search.brave.com. Each search uses one request of your plan.
+# [tools.brave]
+# api_key = "BSA..."
 # # Optional. Results per search, 1-20. Default 5.
 # results = 5
 

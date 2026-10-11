@@ -196,7 +196,7 @@ When the obvious interpretation is clear, act; ask only when the ambiguity chang
 async fn system_prompt(db: &Db, key: &str, config: &Config, user: Option<u64>) -> Result<String> {
     let cwd = std::env::current_dir().context("failed to read current directory")?;
     let memories = db.memories(user).await.context("failed to load memory")?;
-    let mut tools = if config.searxng.is_some() {
+    let mut tools = if config.search.is_some() {
         format!("{}\n\n", search::GUIDANCE)
     } else {
         String::new()
@@ -290,7 +290,7 @@ fn request(
             settings::tool(),
         ]
         .into_iter()
-        .chain(config.searxng.is_some().then(search::tool))
+        .chain(config.search.is_some().then(search::tool))
         .chain(config.claude_code.as_ref().map(claude_code::tool))
         .chain(extra.iter().cloned())
         .collect(),
@@ -312,7 +312,7 @@ pub struct Agent {
     config: Config,
     db: Db,
     conversation_id: i64,
-    /// Set when `[tools.searxng]` is configured.
+    /// Set when `[tools.searxng]` or `[tools.brave]` is configured.
     search: Option<WebSearch>,
     fetcher: Fetcher,
     /// Shared by every conversation in the process.
@@ -336,7 +336,7 @@ impl Agent {
             .collect::<Result<Vec<Message>, _>>()
             .context("stored conversation is unreadable; send /new to start over")?;
         let system = system_prompt(&db, key, &config, None).await?;
-        let search = config.searxng.clone().map(WebSearch::new).transpose()?;
+        let search = config.search.clone().map(WebSearch::new).transpose()?;
         Ok(Self {
             model: Model::new(&config, &format!("mitten-{}", conversation.id))?,
             reviewer: Review::new(&config, &format!("mitten-{}-review", conversation.id))?,
@@ -530,8 +530,8 @@ impl Agent {
             self.reviewer =
                 Review::new(&fresh, &format!("mitten-{}-review", self.conversation_id))?;
         }
-        let searxng = self.config.searxng.take();
-        self.config = Config { searxng, ..fresh };
+        let search = self.config.search.take();
+        self.config = Config { search, ..fresh };
         Ok(())
     }
 

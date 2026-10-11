@@ -1,20 +1,24 @@
-//! `web_search` tool: queries a user-hosted SearXNG instance through its JSON API.
+//! `web_search` tool: queries a user-hosted SearXNG instance or the Brave Search API, whichever the
+//! config names.
 
 use std::collections::HashMap;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
+use chrono::NaiveDate;
 use reqwest::StatusCode;
 use reqwest::header::ACCEPT;
 use rig_core::completion::ToolDefinition;
 use serde_json::{Value, json};
 
-use crate::config::Searxng;
+use crate::config::{Brave, Search, Searxng};
 
 const TIMEOUT: Duration = Duration::from_secs(15);
 /// Snippet characters kept per result; titles and URLs are kept whole.
 const MAX_SNIPPET_CHARS: usize = 300;
+/// Brave Search API base; `/web/search` and `/news/search` are appended.
+const BRAVE_URL: &str = "https://api.search.brave.com/res/v1";
 /// How long a search's results are reused for the same search, sparing SearXNG's upstream engines.
 const CACHE_TTL: Duration = Duration::from_secs(600);
 
@@ -61,11 +65,11 @@ pub fn tool() -> ToolDefinition {
                 },
                 "after": {
                     "type": "string",
-                    "description": "Only results published on or after this date, YYYY-MM-DD. Approximate; overrides time_range and category.",
+                    "description": "Only results published on or after this date, YYYY-MM-DD. Approximate; overrides time_range.",
                 },
                 "before": {
                     "type": "string",
-                    "description": "Only results published before this date, YYYY-MM-DD. Approximate; overrides time_range and category.",
+                    "description": "Only results published before this date, YYYY-MM-DD. Approximate; overrides time_range.",
                 },
             },
             "required": ["query"],
@@ -76,14 +80,16 @@ pub fn tool() -> ToolDefinition {
 #[derive(Debug)]
 pub struct WebSearch {
     client: reqwest::Client,
-    config: Searxng,
+    search: Search,
+    /// `BRAVE_URL`, replaced in tests.
+    brave_url: String,
     /// Formatted results by search, with when they were fetched.
     // ponytail: in memory, per conversation; share across conversations if repeats span them.
     cache: Mutex<HashMap<String, (Instant, String)>>,
 }
 
 impl WebSearch {
-    pub fn new(config: Searxng) -> Result<Self> {
+    pub fn new(search: Search) -> Result<Self> {
         let client = reqwest::Client::builder()
             .timeout(TIMEOUT)
             .user_agent(concat!("mitten/", env!("CARGO_PKG_VERSION")))
@@ -91,7 +97,8 @@ impl WebSearch {
             .context("failed to build HTTP client")?;
         Ok(Self {
             client,
-            config,
+            search,
+            brave_url: BRAVE_URL.to_owned(),
             cache: Mutex::default(),
         })
     }
@@ -105,34 +112,37 @@ impl WebSearch {
         else {
             return "error: `query` is required".to_owned();
         };
-        // Only known values reach SearXNG; anything else falls back to its default.
+        // Only known values reach the provider; anything else falls back to its default.
         let pick = |key: &str, allowed: &[&'static str]| {
             args[key]
                 .as_str()
                 .and_then(|v| allowed.iter().find(|a| **a == v).copied())
         };
-        let mut time_range = pick("time_range", &["day", "week", "month", "year"]);
-        let mut category = pick("category", &["general", "news"]);
-        let dates = match date_operators(args) {
-            Ok(dates) => dates,
-            Err(problem) => return format!("error: {problem}"),
+        let (after, before) = match (date(args, "after"), date(args, "before")) {
+            (Ok(after), Ok(before)) => (after, before),
+            (Err(problem), _) | (_, Err(problem)) => return format!("error: {problem}"),
         };
-        let query = if dates.is_empty() {
-            query.to_owned()
-        } else {
-            // SearXNG has no date range; Google reads these from the query. News engines (Bing)
-            // return nothing with them, so the search goes to general engines only.
-            time_range = None;
-            category = Some("general");
-            format!("{query} {dates}")
+        let request = Request {
+            query,
+            // A date span replaces the recent-period filter.
+            time_range: (after.is_none() && before.is_none())
+                .then(|| pick("time_range", &["day", "week", "month", "year"]))
+                .flatten(),
+            news: pick("category", &["general", "news"]) == Some("news"),
+            after,
+            before,
         };
-        let key = format!("{query}\n{time_range:?}\n{category:?}");
+        let key = format!("{request:?}");
         if let Some(results) = self.cached(&key) {
             return format!("(same search as before, results reused)\n{results}");
         }
-        match self.fetch(&query, time_range, category).await {
+        let body = match &self.search {
+            Search::Searxng(config) => self.searxng(config, &request).await,
+            Search::Brave(config) => self.brave(config, &request).await,
+        };
+        match body {
             Ok(body) => {
-                let results = format_results(&body, self.config.results);
+                let results = format_results(&body, self.search.results());
                 if let Ok(mut cache) = self.cache.lock() {
                     cache.retain(|_, (at, _)| at.elapsed() < CACHE_TTL);
                     cache.insert(key, (Instant::now(), results.clone()));
@@ -150,26 +160,33 @@ impl WebSearch {
         (at.elapsed() < CACHE_TTL).then(|| results.clone())
     }
 
-    async fn fetch(
-        &self,
-        query: &str,
-        time_range: Option<&str>,
-        category: Option<&str>,
-    ) -> Result<Value> {
-        let params = [("q", Some(query)), ("format", Some("json"))]
-            .into_iter()
-            .chain([("time_range", time_range), ("categories", category)])
-            .filter_map(|(key, value)| Some((key, value?)));
-        let url = reqwest::Url::parse_with_params(&format!("{}/search", self.config.url), params)
-            .context("invalid SearXNG URL")?;
-        let mut request = self.client.get(url).header(ACCEPT, "application/json");
-        if let Some((user, password)) = &self.config.auth {
-            request = request.basic_auth(user, Some(password.as_str()));
+    async fn searxng(&self, config: &Searxng, request: &Request<'_>) -> Result<Value> {
+        let mut query = request.query.to_owned();
+        let mut category = request.news.then_some("news");
+        if request.after.is_some() || request.before.is_some() {
+            // SearXNG has no date range; Google reads these operators from the query. News
+            // engines (Bing) return nothing with them, so the search goes to general engines only.
+            for (key, date) in [("after", request.after), ("before", request.before)] {
+                if let Some(date) = date {
+                    query.push_str(&format!(" {key}:{date}"));
+                }
+            }
+            category = Some("general");
         }
-        let response = request
+        let params = [("q", Some(query.as_str())), ("format", Some("json"))]
+            .into_iter()
+            .chain([("time_range", request.time_range), ("categories", category)])
+            .filter_map(|(key, value)| Some((key, value?)));
+        let url = reqwest::Url::parse_with_params(&format!("{}/search", config.url), params)
+            .context("invalid SearXNG URL")?;
+        let mut http = self.client.get(url).header(ACCEPT, "application/json");
+        if let Some((user, password)) = &config.auth {
+            http = http.basic_auth(user, Some(password.as_str()));
+        }
+        let response = http
             .send()
             .await
-            .with_context(|| format!("could not reach SearXNG at {}", self.config.url))?;
+            .with_context(|| format!("could not reach SearXNG at {}", config.url))?;
         match response.status() {
             status if status.is_success() => {}
             StatusCode::UNAUTHORIZED => {
@@ -187,23 +204,99 @@ impl WebSearch {
             .await
             .context("SearXNG did not return JSON; is `json` in search.formats?")
     }
-}
 
-/// `after:` / `before:` query operators from the call's dates, empty if neither is given.
-fn date_operators(args: &Value) -> std::result::Result<String, String> {
-    let mut operators = Vec::new();
-    for key in ["after", "before"] {
-        let Some(text) = args[key].as_str().map(str::trim).filter(|t| !t.is_empty()) else {
-            continue;
+    /// Searches Brave and reshapes its results like SearXNG's, so `format_results` reads both.
+    async fn brave(&self, config: &Brave, request: &Request<'_>) -> Result<Value> {
+        let freshness = match (request.after, request.before) {
+            // Past day, week, month, year.
+            (None, None) => request.time_range.map(|range| format!("p{}", &range[..1])),
+            // Brave takes an inclusive span; `before` excludes its own day.
+            (after, before) => Some(format!(
+                "{}to{}",
+                // `NaiveDate::MIN` prints a negative year; nothing older than this is indexed anyway.
+                after.unwrap_or(NaiveDate::from_ymd_opt(1970, 1, 1).unwrap_or_default()),
+                before
+                    .and_then(|d| d.pred_opt())
+                    .unwrap_or_else(|| chrono::Utc::now().date_naive()),
+            )),
         };
-        let date = chrono::NaiveDate::parse_from_str(text, "%Y-%m-%d")
-            .map_err(|_| format!("`{key}` must be a date like 2026-09-30, not {text:?}"))?;
-        operators.push(format!("{key}:{date}"));
+        let count = config.results.to_string();
+        let endpoint = if request.news { "news" } else { "web" };
+        let params = [("q", Some(request.query)), ("count", Some(count.as_str()))]
+            .into_iter()
+            .chain([("freshness", freshness.as_deref())])
+            .chain((!request.news).then_some(("text_decorations", Some("false"))))
+            .filter_map(|(key, value)| Some((key, value?)));
+        let url = reqwest::Url::parse_with_params(
+            &format!("{}/{endpoint}/search", self.brave_url),
+            params,
+        )
+        .context("invalid Brave URL")?;
+        let response = self
+            .client
+            .get(url)
+            .header(ACCEPT, "application/json")
+            .header("X-Subscription-Token", config.api_key.as_str())
+            .send()
+            .await
+            .context("could not reach the Brave Search API")?;
+        match response.status() {
+            status if status.is_success() => {}
+            StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN => {
+                bail!("Brave rejected the API key (HTTP {})", response.status())
+            }
+            StatusCode::TOO_MANY_REQUESTS => {
+                bail!("Brave rate limit or monthly quota reached (HTTP 429)")
+            }
+            status => bail!("Brave returned HTTP {status}"),
+        }
+        let body: Value = response.json().await.context("Brave did not return JSON")?;
+        let rows = if request.news {
+            &body["results"]
+        } else {
+            &body["web"]["results"]
+        };
+        let rows = rows.as_array().map(Vec::as_slice).unwrap_or_default();
+        // Brave already ranks them; a falling score keeps that order through `format_results`.
+        let results: Vec<Value> = rows
+            .iter()
+            .enumerate()
+            .map(|(i, r)| {
+                json!({
+                    "title": r["title"],
+                    "url": r["url"],
+                    "content": r["description"],
+                    "publishedDate": r["page_age"],
+                    "score": -(i as f64),
+                })
+            })
+            .collect();
+        Ok(json!({ "results": results }))
     }
-    Ok(operators.join(" "))
 }
 
-/// The top `limit` results by SearXNG's score, as numbered title / URL (and date) / snippet blocks.
+/// One `web_search` call, validated.
+#[derive(Debug)]
+struct Request<'a> {
+    query: &'a str,
+    /// `day`, `week`, `month`, or `year`; `None` when a date span is given.
+    time_range: Option<&'static str>,
+    news: bool,
+    after: Option<NaiveDate>,
+    before: Option<NaiveDate>,
+}
+
+/// The `YYYY-MM-DD` date in `args[key]`, if given.
+fn date(args: &Value, key: &str) -> std::result::Result<Option<NaiveDate>, String> {
+    let Some(text) = args[key].as_str().map(str::trim).filter(|t| !t.is_empty()) else {
+        return Ok(None);
+    };
+    NaiveDate::parse_from_str(text, "%Y-%m-%d")
+        .map(Some)
+        .map_err(|_| format!("`{key}` must be a date like 2026-09-30, not {text:?}"))
+}
+
+/// The top `limit` results by score, as numbered title / URL (and date) / snippet blocks.
 fn format_results(body: &Value, limit: usize) -> String {
     let score = |r: &&Value| r["score"].as_f64().unwrap_or(0.0);
     let mut results: Vec<&Value> = body["results"]
@@ -291,11 +384,11 @@ mod tests {
             let password = serde_json::from_value(json!("pw")).expect("secret");
             ("me".to_owned(), password)
         });
-        WebSearch::new(Searxng {
+        WebSearch::new(Search::Searxng(Searxng {
             url,
             auth,
             results: 5,
-        })
+        }))
         .expect("client")
     }
 
@@ -390,6 +483,74 @@ mod tests {
             other.starts_with("error:"),
             "different parameters miss: {other}"
         );
+    }
+
+    fn brave(url: String) -> WebSearch {
+        let api_key = serde_json::from_value(json!("bk")).expect("secret");
+        let mut search = WebSearch::new(Search::Brave(Brave {
+            api_key,
+            results: 5,
+        }))
+        .expect("client");
+        search.brave_url = url;
+        search
+    }
+
+    #[tokio::test]
+    async fn brave_sends_key_and_freshness_and_reads_web_results() {
+        let (url, server) = one_shot_server(
+            "200 OK",
+            r#"{"web":{"results":[
+                {"title":"first","url":"https://a","description":"d1","page_age":"2026-09-30T08:00:00"},
+                {"title":"second","url":"https://b","description":"d2"}
+            ]}}"#,
+        )
+        .await;
+        let args = json!({"query": "taiex", "after": "2026-09-29", "before": "2026-10-01"});
+        let out = brave(url).run(&args).await;
+        assert_eq!(
+            out,
+            "1. first\n   https://a · 2026-09-30\n   d1\n\n2. second\n   https://b\n   d2"
+        );
+        let request = server.await.expect("server");
+        assert!(
+            request.starts_with(
+                "GET /web/search?q=taiex&count=5&freshness=2026-09-29to2026-09-30&text_decorations=false "
+            ),
+            "{request}"
+        );
+        assert!(
+            request.to_lowercase().contains("x-subscription-token: bk"),
+            "{request}"
+        );
+    }
+
+    #[tokio::test]
+    async fn brave_news_uses_news_endpoint_and_past_period() {
+        let (url, server) = one_shot_server(
+            "200 OK",
+            r#"{"results":[{"title":"n","url":"https://n","description":"x"}]}"#,
+        )
+        .await;
+        let args = json!({"query": "taiwan", "category": "news", "time_range": "week"});
+        assert_eq!(brave(url).run(&args).await, "1. n\n   https://n\n   x");
+        let request = server.await.expect("server");
+        assert!(
+            request.starts_with("GET /news/search?q=taiwan&count=5&freshness=pw "),
+            "{request}"
+        );
+        let (url, server) = one_shot_server("200 OK", r#"{"web":{"results":[]}}"#).await;
+        brave(url)
+            .run(&json!({"query": "x", "before": "2026-10-01"}))
+            .await;
+        let request = server.await.expect("server");
+        assert!(
+            request.contains("freshness=1970-01-01to2026-09-30"),
+            "{request}"
+        );
+        let (url, _server) = one_shot_server("429 Too Many Requests", "").await;
+        let out = brave(url).run(&json!({"query": "x"})).await;
+        assert!(out.contains("quota"), "{out}");
     }
 
     #[tokio::test]

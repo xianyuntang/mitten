@@ -32,6 +32,8 @@ pub const MODELS: &[&str] = &[
 const CUSTOM: &str = "Custom…";
 const ENABLED: &str = "Enabled";
 const DISABLED: &str = "Disabled";
+const SEARXNG: &str = "SearXNG";
+const BRAVE: &str = "Brave Search API";
 const STEPS: [&str; 6] = [
     "Model",
     "Discord",
@@ -117,8 +119,9 @@ const CLAUDE_DIRS: usize = 24;
 const CLAUDE_MODE: usize = 25;
 const CLAUDE_TOOLS: usize = 26;
 const TIMEZONE: usize = 27;
+const BRAVE_KEY: usize = 28;
 /// First of the rows for already configured MCP servers.
-const MCP_FIRST: usize = 28;
+const MCP_FIRST: usize = 29;
 
 /// Focus value for the Save button under the fields.
 const BUTTON: usize = usize::MAX;
@@ -133,7 +136,8 @@ struct Form {
     status: Line<'static>,
     /// Set after a failed connection test; the next save skips the test.
     force_save: bool,
-    /// `tools.searxng.results`, not on the form; kept so saving doesn't reset a hand-edited value.
+    /// `tools.searxng.results` or `tools.brave.results`, not on the form; kept so saving doesn't
+    /// reset a hand-edited value.
     search_results: usize,
     /// `tools.claude_code` timeout and command, not on the form; kept like `search_results`.
     claude_extra: (u64, String),
@@ -157,7 +161,12 @@ fn options_with(values: &[&str], current: &str) -> Vec<String> {
 impl Form {
     fn new(current: Option<&Config>) -> Result<Self> {
         let discord = current.and_then(|c| c.discord.as_ref());
-        let searxng = current.and_then(|c| c.searxng.as_ref());
+        let search = current.and_then(|c| c.search.as_ref());
+        let (searxng, brave) = match search {
+            Some(config::Search::Searxng(searxng)) => (Some(searxng), None),
+            Some(config::Search::Brave(brave)) => (None, Some(brave)),
+            None => (None, None),
+        };
         let search_auth = searxng.and_then(|s| s.auth.as_ref());
         let model = current.map_or(MODELS[0], |c| c.model.as_str());
         let preset = MODELS.contains(&model);
@@ -237,8 +246,13 @@ impl Form {
             field(
                 2,
                 "Web search",
-                Kind::Select(options(&[DISABLED, ENABLED])),
-                if searxng.is_some() { ENABLED } else { DISABLED }.to_owned(),
+                Kind::Select(options(&[DISABLED, SEARXNG, BRAVE])),
+                match search {
+                    Some(config::Search::Searxng(_)) => SEARXNG,
+                    Some(config::Search::Brave(_)) => BRAVE,
+                    None => DISABLED,
+                }
+                .to_owned(),
             ),
             field(
                 2,
@@ -349,6 +363,14 @@ impl Form {
         ));
         let zone = current.map_or_else(config::system_timezone, |c| c.timezone);
         fields.push(field(5, "Time zone", Kind::Text, zone.name().to_owned()));
+        fields.push(field(
+            2,
+            "Brave API key",
+            Kind::Secret,
+            brave
+                .map(|b| b.api_key.as_str().to_owned())
+                .unwrap_or_default(),
+        ));
         let mcp_names: Vec<String> = current
             .map(|c| c.mcp.keys().cloned().collect())
             .unwrap_or_default();
@@ -368,7 +390,7 @@ impl Form {
             reveal: false,
             status: Line::default(),
             force_save: false,
-            search_results: searxng.map_or(5, |s| s.results),
+            search_results: search.map_or(5, config::Search::results),
             claude_extra: current
                 .and_then(|c| c.claude_code.as_ref())
                 .map_or((1800, "claude".to_owned()), |c| {
@@ -384,7 +406,8 @@ impl Form {
             && match i {
                 CUSTOM_MODEL => self.fields[MODEL].value == CUSTOM,
                 TOKEN | USERS => self.fields[DISCORD].value == ENABLED,
-                SEARCH_URL | SEARCH_USER | SEARCH_PASSWORD => self.fields[SEARCH].value == ENABLED,
+                SEARCH_URL | SEARCH_USER | SEARCH_PASSWORD => self.fields[SEARCH].value == SEARXNG,
+                BRAVE_KEY => self.fields[SEARCH].value == BRAVE,
                 MCP_NAME | MCP_APPROVE => self.fields[MCP_ADD].value != NO,
                 MCP_COMMAND | MCP_ARGS | MCP_ENV => self.fields[MCP_ADD].value == STDIO,
                 MCP_URL | MCP_TOKEN => self.fields[MCP_ADD].value == HTTP,
@@ -624,8 +647,15 @@ impl Form {
     }
 
     fn search(&self) -> std::result::Result<Option<SearchAnswers>, String> {
-        if self.fields[SEARCH].value != ENABLED {
-            return Ok(None);
+        match self.fields[SEARCH].value.as_str() {
+            SEARXNG => {}
+            BRAVE => {
+                return Ok(Some(SearchAnswers::Brave {
+                    api_key: self.required(BRAVE_KEY)?,
+                    results: self.search_results,
+                }));
+            }
+            _ => return Ok(None),
         }
         let url = self.required(SEARCH_URL)?;
         if !url.starts_with("http://") && !url.starts_with("https://") {
@@ -636,7 +666,7 @@ impl Form {
             (user, password) if !user.is_empty() && !password.is_empty() => Some((user, password)),
             _ => return Err("fill in both Username and Password, or leave both empty".to_owned()),
         };
-        Ok(Some(SearchAnswers {
+        Ok(Some(SearchAnswers::Searxng {
             url,
             auth,
             results: self.search_results,
@@ -889,10 +919,16 @@ fn default_database_path() -> Result<PathBuf> {
         .join(".local/share/mitten/mitten.db"))
 }
 
-struct SearchAnswers {
-    url: String,
-    auth: Option<(String, String)>,
-    results: usize,
+enum SearchAnswers {
+    Searxng {
+        url: String,
+        auth: Option<(String, String)>,
+        results: usize,
+    },
+    Brave {
+        api_key: String,
+        results: usize,
+    },
 }
 
 struct ClaudeAnswers {
@@ -1001,19 +1037,25 @@ fn render_toml(answers: &Answers) -> String {
             quote(&claude.command),
         ));
     }
-    if let Some(search) = &answers.search {
-        text.push_str(&format!(
-            "\n[tools.searxng]\nurl = {}\nresults = {}\n",
-            quote(&search.url),
-            search.results
-        ));
-        if let Some((user, password)) = &search.auth {
+    match &answers.search {
+        Some(SearchAnswers::Searxng { url, auth, results }) => {
             text.push_str(&format!(
-                "username = {}\npassword = {}\n",
-                quote(user),
-                quote(password)
+                "\n[tools.searxng]\nurl = {}\nresults = {results}\n",
+                quote(url)
             ));
+            if let Some((user, password)) = auth {
+                text.push_str(&format!(
+                    "username = {}\npassword = {}\n",
+                    quote(user),
+                    quote(password)
+                ));
+            }
         }
+        Some(SearchAnswers::Brave { api_key, results }) => text.push_str(&format!(
+            "\n[tools.brave]\napi_key = {}\nresults = {results}\n",
+            quote(api_key)
+        )),
+        None => {}
     }
     if let Some(discord) = &answers.discord {
         let users = discord
@@ -1109,7 +1151,7 @@ mod tests {
                 timeout_secs: 600,
                 command: "claude".to_owned(),
             }),
-            search: Some(SearchAnswers {
+            search: Some(SearchAnswers::Searxng {
                 url: "https://search.example.com".to_owned(),
                 auth: Some(("me".to_owned(), "p\"w".to_owned())),
                 results: 8,
@@ -1138,11 +1180,46 @@ mod tests {
         );
         assert_eq!(config.api_key.as_str(), "sk-\"quoted\"");
         assert_eq!(config.discord.map(|d| d.allowed_users), Some(vec![1, 22]));
-        let searxng = config.searxng.expect("search section");
+        let Some(config::Search::Searxng(searxng)) = config.search else {
+            panic!("search section");
+        };
         assert_eq!(searxng.url, "https://search.example.com");
         assert_eq!(searxng.results, 8);
         let (user, password) = searxng.auth.expect("basic auth");
         assert_eq!((user.as_str(), password.as_str()), ("me", "p\"w"));
+    }
+
+    #[test]
+    fn brave_choice_renders_its_section() {
+        let mut form = Form::new(None).expect("form");
+        form.fields[SEARCH].value = BRAVE.to_owned();
+        form.step = 2;
+        assert!(form.visible().contains(&BRAVE_KEY));
+        assert!(!form.visible().contains(&SEARCH_URL));
+        assert!(form.check_step(2).is_err(), "Brave needs a key");
+        form.fields[BRAVE_KEY].value = "bk".to_owned();
+        let Some(answers) = form.search().expect("valid") else {
+            panic!("search on");
+        };
+        let text = render_toml(&Answers {
+            model: "m".to_owned(),
+            api_key: "k".to_owned(),
+            discord: None,
+            search: Some(answers),
+            claude_code: None,
+            log_level: "warn".to_owned(),
+            auto_approval: None,
+            database: PathBuf::from("/tmp/m.db"),
+            timezone: None,
+        });
+        let config = Config::parse(&text).expect("valid");
+        let Some(config::Search::Brave(brave)) = &config.search else {
+            panic!("brave section");
+        };
+        assert_eq!((brave.api_key.as_str(), brave.results), ("bk", 5));
+        let reopened = Form::new(Some(&config)).expect("form");
+        assert_eq!(reopened.fields[SEARCH].value, BRAVE);
+        assert_eq!(reopened.fields[BRAVE_KEY].value, "bk");
     }
 
     #[test]
@@ -1174,8 +1251,9 @@ mod tests {
 
         form.step = 2;
         assert!(!form.visible().contains(&SEARCH_URL));
-        form.fields[SEARCH].value = ENABLED.to_owned();
+        form.fields[SEARCH].value = SEARXNG.to_owned();
         assert!(form.visible().contains(&SEARCH_PASSWORD));
+        assert!(!form.visible().contains(&BRAVE_KEY));
         form.fields[SEARCH_URL].value = "search.example.com".to_owned();
         assert!(form.check_step(form.step).is_err(), "URL needs a scheme");
         form.fields[SEARCH_URL].value = "https://search.example.com".to_owned();
