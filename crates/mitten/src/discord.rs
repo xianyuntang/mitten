@@ -13,12 +13,13 @@ use serenity::all::{
     Attachment, AutoArchiveDuration, ButtonStyle, ChannelId, ChannelType, Client,
     ComponentInteraction, Context, CreateActionRow, CreateAllowedMentions, CreateButton,
     CreateInteractionResponse, CreateInteractionResponseMessage, CreateMessage, CreateThread,
-    EditMessage, EventHandler, GatewayIntents, Http, Interaction, Message, MessageId, Ready,
+    EditMessage, EditThread, EventHandler, GatewayIntents, Http, Interaction, Message, MessageId,
+    Ready,
 };
 use serenity::async_trait;
 use tokio::sync::mpsc;
 
-use crate::agent::{Agent, Io};
+use crate::agent::{self, Agent, Io};
 use crate::config::Config;
 use crate::cron;
 use crate::db::{Db, Job};
@@ -269,7 +270,7 @@ impl EventHandler for Handler {
         if let Err(err) = msg.react(&ctx.http, RECEIVED).await {
             tracing::warn!("failed to react to message: {err:#}");
         }
-        let channel = match route(&ctx, &msg).await {
+        let channel = match route(&ctx, &msg, &self.config).await {
             Ok(channel) => channel,
             Err(err) => {
                 tracing::warn!("failed to open a thread, answering in place: {err:#}");
@@ -306,8 +307,9 @@ impl EventHandler for Handler {
 }
 
 /// Where `msg` is answered: a new thread off a message in a server text channel, otherwise
-/// the channel itself.
-async fn route(ctx: &Context, msg: &Message) -> Result<ChannelId> {
+/// the channel itself. A new thread starts with the message's first line as its name, and the
+/// model renames it in the background.
+async fn route(ctx: &Context, msg: &Message, config: &Config) -> Result<ChannelId> {
     let here = msg.channel_id;
     if msg.guild_id.is_none() {
         return Ok(here);
@@ -323,10 +325,34 @@ async fn route(ctx: &Context, msg: &Message) -> Result<ChannelId> {
             let thread = here
                 .create_thread_from_message(&ctx.http, msg.id, thread)
                 .await?;
+            let (http, config, content) = (ctx.http.clone(), config.clone(), msg.content.clone());
+            tokio::spawn(async move { rename(&http, thread.id, &config, &content).await });
             thread.id
         }
         _ => here,
     })
+}
+
+/// Renames `thread` to a title the model writes for `content`; failures are only logged, and
+/// the thread keeps its first-line name.
+async fn rename(http: &Http, thread: ChannelId, config: &Config, content: &str) {
+    if content.trim().is_empty() {
+        return;
+    }
+    let title = match agent::title(config, content).await {
+        Ok(title) if !title.is_empty() => thread_name(&title),
+        Ok(_) => return,
+        Err(err) => {
+            tracing::warn!("failed to title thread: {err:#}");
+            return;
+        }
+    };
+    if let Err(err) = thread
+        .edit_thread(http, EditThread::new().name(title))
+        .await
+    {
+        tracing::warn!("failed to rename thread: {err:#}");
+    }
 }
 
 /// The message's first line, shortened to fit a thread name.

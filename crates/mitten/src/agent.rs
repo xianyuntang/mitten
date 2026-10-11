@@ -868,6 +868,36 @@ impl Agent {
     }
 }
 
+/// A short title for a conversation that opens with `text`, in its language.
+pub async fn title(config: &Config, text: &str) -> Result<String> {
+    let model = Model::new(config, "mitten-title")?;
+    let mut request = request(
+        config,
+        "Name the chat thread that opens with the user's message: a short title under 40 \
+         characters, in the message's language, saying what it is about. Reply with only the title.",
+        &[Message::user(text)],
+        &[],
+    );
+    request.tools.clear();
+    let response = model
+        .complete(request)
+        .await
+        .context("title request failed")?;
+    let title: String = response
+        .choice
+        .iter()
+        .filter_map(|content| match content {
+            AssistantContent::Text(text) => Some(text.text()),
+            _ => None,
+        })
+        .collect();
+    Ok(title
+        .trim()
+        .trim_matches(['"', '\'', '「', '」', '*', '#'])
+        .trim()
+        .to_owned())
+}
+
 /// Sends one tiny request to check the key and model work; returns the model's reply.
 pub async fn ping(config: &Config) -> Result<String> {
     let model = Model::new(config, "mitten-ping")?;
