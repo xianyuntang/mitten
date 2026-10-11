@@ -52,17 +52,32 @@ pub fn update() -> Result<()> {
     if !status.success() {
         bail!("update failed: {status}");
     }
+    restart_installed()?;
+    Ok(())
+}
+
+/// Restarts the background service, e.g. after editing the config by hand.
+pub fn restart() -> Result<()> {
+    if !restart_installed()? {
+        bail!("no background service is installed; run `mitten install` first");
+    }
+    Ok(())
+}
+
+/// Restarts the background service if one is installed; false if there is none.
+fn restart_installed() -> Result<bool> {
     let home = std::env::home_dir().context("cannot find home directory")?;
     if cfg!(target_os = "macos") && plist_path(&home).exists() {
         let plist = plist_path(&home);
         let _ = launchctl(&["unload", path_str(&plist)?]);
         launchctl(&["load", "-w", path_str(&plist)?])?;
-        println!("restarted the background service");
     } else if cfg!(target_os = "linux") && unit_path(&home).exists() {
         systemctl(&["restart", UNIT])?;
-        println!("restarted the background service");
+    } else {
+        return Ok(false);
     }
-    Ok(())
+    println!("restarted the background service");
+    Ok(true)
 }
 
 fn plist_path(home: &Path) -> PathBuf {

@@ -15,6 +15,7 @@ mod review;
 mod search;
 mod service;
 mod settings;
+mod skill;
 
 use std::io::IsTerminal;
 use std::path::PathBuf;
@@ -24,14 +25,15 @@ use tracing_subscriber::EnvFilter;
 use tracing_subscriber::fmt::writer::BoxMakeWriter;
 
 const USAGE: &str =
-    "usage: mitten [chat|serve|configure|install|uninstall|update] [--config PATH] [--version]
+    "usage: mitten [chat|serve|configure|install|uninstall|update|restart] [--config PATH] [--version]
 
   chat       talk in this terminal (default)
   configure  interactive setup: API key, model, Discord
   serve      run the Discord bot from [discord]
   install    run `mitten serve` in the background and keep it alive (launchd or systemd)
   uninstall  remove the background service
-  update     install the latest release and restart the background service";
+  update     install the latest release and restart the background service
+  restart    restart the background service, e.g. after editing the config";
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -51,11 +53,10 @@ async fn main() -> Result<()> {
                 println!("mitten {}", env!("CARGO_PKG_VERSION"));
                 return Ok(());
             }
-            Some(name @ ("chat" | "serve" | "configure" | "install" | "uninstall" | "update"))
-                if command.is_none() =>
-            {
-                command = Some(name.to_owned())
-            }
+            Some(
+                name @ ("chat" | "serve" | "configure" | "install" | "uninstall" | "update"
+                | "restart"),
+            ) if command.is_none() => command = Some(name.to_owned()),
             _ => bail!("unexpected argument {arg:?}\n\n{USAGE}"),
         }
     }
@@ -64,6 +65,9 @@ async fn main() -> Result<()> {
     }
     if command.as_deref() == Some("update") {
         return service::update();
+    }
+    if command.as_deref() == Some("restart") {
+        return service::restart();
     }
     let config_path = match config_path {
         Some(path) => std::path::absolute(path).context("failed to resolve --config path")?,

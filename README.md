@@ -78,6 +78,7 @@ How it behaves:
 
 ```sh
 mitten install     # launchd on macOS, a systemd user service on Linux
+mitten restart     # after editing the config by hand
 mitten uninstall
 ```
 
@@ -100,6 +101,7 @@ Logs:
 | `fetch_url` | Reads a web page as text, optionally rendered in headless Chrome. Private network addresses are refused. | No |
 | `web_search` | Searches through your SearXNG instance or the Brave Search API (pick one in `mitten configure`), optionally only recent results (`time_range`), news sites (`category`), or a date span (`after`, `before`; on SearXNG only Google engines honor it). Results show their publish date when known. | No |
 | `memory` | Saves short notes about the person talking, loaded into their later conversations. | No |
+| `skill` | Loads, saves, or removes skills: saved instructions for recurring tasks, kept in the database and shared by everyone. Their names and descriptions are listed in every conversation; the model loads one when a task matches, and offers to save a finished multi-step task as a new one. | Save and remove |
 | `cron` | Schedules a named prompt to run later, once (`at`) or on a cron expression, in the config's `timezone` (default: this machine's; restart `mitten serve` after changing it). Each run starts a fresh conversation and posts its reply in the Discord channel or thread where the job was made. Discord only; jobs run while `mitten serve` is up, and a run missed while it was down happens once on startup. Approval prompts during a run are denied unless approval is set to auto. A job's instructions are shown when it is made or changed; ask to change its instructions or timing, remove it, or give it a trial run now (posted where the job was made, schedule unchanged). | No |
 | `settings` | Reads or changes the model and a few limits. | Yes |
 | MCP tools | Any tool from the MCP servers you connect. | Yes, per server |

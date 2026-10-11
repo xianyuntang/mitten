@@ -29,6 +29,7 @@ use crate::review::{self, Guard, Reviewer};
 use crate::search;
 use crate::search::WebSearch;
 use crate::settings;
+use crate::skill;
 
 /// How long a new model gets to answer its test request before a switch is refused.
 const PING_TIMEOUT: Duration = Duration::from_secs(30);
@@ -196,6 +197,7 @@ When the obvious interpretation is clear, act; ask only when the ambiguity chang
 async fn system_prompt(db: &Db, key: &str, config: &Config, user: Option<u64>) -> Result<String> {
     let cwd = std::env::current_dir().context("failed to read current directory")?;
     let memories = db.memories(user).await.context("failed to load memory")?;
+    let skills = db.skills().await.context("failed to load skills")?;
     let mut tools = if config.search.is_some() {
         format!("{}\n\n", search::GUIDANCE)
     } else {
@@ -205,8 +207,9 @@ async fn system_prompt(db: &Db, key: &str, config: &Config, user: Option<u64>) -
         tools.push_str(&format!("{}\n\n", claude_code::guidance(claude_code)));
     }
     Ok(format!(
-        "{IDENTITY}\n\n{tools}{guidance}\n\nOS: {os}. Working directory: {cwd}.\n\n{hint}\n\n{saved}",
+        "{IDENTITY}\n\n{tools}{guidance}\n\n{skills}\n\nOS: {os}. Working directory: {cwd}.\n\n{hint}\n\n{saved}",
         guidance = memory::GUIDANCE,
+        skills = skill::section(&skills),
         hint = platform_hint(key),
         saved = memory::snapshot(&memories),
         os = os_name(),
@@ -286,6 +289,7 @@ fn request(
             files::read_tool(),
             files::list_tool(),
             memory::tool(),
+            skill::tool(),
             fetch::tool(),
             settings::tool(),
         ]
@@ -371,6 +375,62 @@ impl Agent {
             "saved; memory uses {used}/{} characters. Every conversation with this person sees it from its next message.",
             memory::CHAR_LIMIT
         ))
+    }
+
+    /// Runs one skill tool call; saving and removing need the user's approval. Problems go back
+    /// to the model as text.
+    async fn skill(&self, args: &Value, io: &mut impl Io) -> Result<String> {
+        let name = match skill::name(args) {
+            Ok(name) => name,
+            Err(problem) => return Ok(format!("error: {problem}")),
+        };
+        let skills = self.db.skills().await?;
+        let existing = skills.iter().find(|s| s.name == name);
+        match args["action"].as_str() {
+            Some("load") => {
+                Ok(existing.map_or_else(|| format!("error: no skill named {name}"), skill::render))
+            }
+            Some("save") => {
+                let new = match skill::plan(args) {
+                    Ok(new) => new,
+                    Err(problem) => return Ok(format!("error: {problem}")),
+                };
+                // Discord cuts long approval prompts short, so show the whole skill first. The
+                // prompt still carries it all, for the auto-approval reviewer.
+                let text = skill::render(&new);
+                io.say(&format!("📘 skill to save:\n\n{text}")).await?;
+                let verb = if existing.is_some() {
+                    "replace"
+                } else {
+                    "save"
+                };
+                if !io
+                    .confirm(&format!("{verb} skill `{name}`:\n{text}"))
+                    .await?
+                {
+                    return Ok("error: the user denied saving this skill".to_owned());
+                }
+                self.db.save_skill(new).await?;
+                io.ran("saved", true).await?;
+                Ok(format!(
+                    "saved skill {name}; it is listed from the next message"
+                ))
+            }
+            Some("remove") => {
+                if existing.is_none() {
+                    return Ok(format!("error: no skill named {name}"));
+                }
+                if !io.confirm(&format!("remove skill `{name}`")).await? {
+                    return Ok("error: the user denied removing this skill".to_owned());
+                }
+                self.db.remove_skill(name.clone()).await?;
+                io.ran("removed", true).await?;
+                Ok(format!("removed skill {name}"))
+            }
+            other => Ok(format!(
+                "error: unknown action {other:?}; use load, save, or remove"
+            )),
+        }
     }
 
     /// Whether this conversation may schedule jobs: only Discord ones, since `mitten serve` runs
@@ -729,6 +789,7 @@ impl Agent {
                     }
                     "list_dir" => files::list(&self.config, &call.function.arguments).await,
                     "memory" => self.remember(&call.function.arguments, io).await?,
+                    "skill" => self.skill(&call.function.arguments, io).await?,
                     "cron" if self.schedules() => self.cron(&call.function.arguments, io).await?,
                     "settings" => self.settings(&call.function.arguments, io).await?,
                     "fetch_url" => {
