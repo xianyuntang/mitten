@@ -156,6 +156,7 @@ async fn run_job(config: Config, db: Db, mcp: Arc<Mcp>, http: Arc<Http>, job: Jo
         inbox,
         approval: None,
         status: None,
+        board: None,
     };
     let run = async {
         io.note(&format!("⏰ job #{} {}", job.id, job.name)).await?;
@@ -369,6 +370,7 @@ async fn run_channel(
         inbox,
         approval: None,
         status: None,
+        board: None,
     };
     // A `/new` that ended a merged burst, handled next on its own.
     let mut next = None;
@@ -493,6 +495,8 @@ struct DiscordIo {
     approval: Option<(MessageId, String)>,
     /// The status message notes are being collected into, and its text so far.
     status: Option<(MessageId, String)>,
+    /// The live board message, edited in place until the board is let go.
+    board: Option<MessageId>,
 }
 
 impl DiscordIo {
@@ -566,6 +570,25 @@ impl Io for DiscordIo {
         }
         let message = self.send(CreateMessage::new().content(&line)).await?;
         self.status = Some((message, line));
+        Ok(())
+    }
+
+    async fn board(&mut self, text: &str) -> Result<()> {
+        if text.is_empty() {
+            self.board = None;
+            return Ok(());
+        }
+        let body: String = text.chars().take(MAX_MESSAGE_CHARS).collect();
+        if let Some(message) = self.board {
+            let edit = EditMessage::new().content(body.as_str());
+            if let Err(err) = self.channel.edit_message(&self.http, message, edit).await {
+                tracing::warn!("failed to update board message: {err:#}");
+            }
+            return Ok(());
+        }
+        // Notes after the board start a new status message below it.
+        self.status = None;
+        self.board = Some(self.send(CreateMessage::new().content(body)).await?);
         Ok(())
     }
 

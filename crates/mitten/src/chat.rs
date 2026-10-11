@@ -69,6 +69,7 @@ enum Update {
     Note(String),
     Confirm(String, oneshot::Sender<bool>),
     Ran { output: String, ok: bool },
+    Board(String),
     Done(Result<(), String>),
 }
 
@@ -122,6 +123,10 @@ impl Io for ChannelIo {
             ok,
         })
     }
+
+    async fn board(&mut self, text: &str) -> Result<()> {
+        self.send(Update::Board(text.to_owned()))
+    }
 }
 
 enum Entry {
@@ -150,6 +155,8 @@ struct App {
     confirm: Option<oneshot::Sender<bool>>,
     /// Lines scrolled up from the bottom of the transcript.
     scroll: usize,
+    /// Live status board shown above the input, e.g. a swarm's crabs; empty when none.
+    board: String,
 }
 
 impl App {
@@ -168,6 +175,7 @@ impl App {
             busy: None,
             confirm: None,
             scroll: 0,
+            board: String::new(),
         }
     }
 
@@ -288,8 +296,19 @@ impl App {
                     *state = Run::Done { output, ok };
                 }
             }
+            Update::Board(text) => {
+                // A board that goes away leaves its summary line in the transcript.
+                if text.is_empty()
+                    && let Some(summary) = self.board.lines().next()
+                {
+                    self.entries.push(Entry::Notice(summary.to_owned()));
+                }
+                self.board = text;
+                return;
+            }
             Update::Done(result) => {
                 self.busy = None;
+                self.board.clear();
                 if let Err(err) = result {
                     self.entries.push(Entry::Error(err));
                 }
@@ -306,12 +325,20 @@ impl App {
     fn draw(&mut self, frame: &mut ratatui::Frame) {
         let (rows, cursor_x) = wrap_input(&self.input, frame.area().width.saturating_sub(4));
         let input_height = (rows.len() as u16).clamp(1, MAX_INPUT_LINES);
-        let [header, body, input_area] = Layout::vertical([
+        let board_height = u16::try_from(self.board.lines().count()).unwrap_or(u16::MAX);
+        let [header, body, board, input_area] = Layout::vertical([
             Constraint::Length(1),
             Constraint::Min(1),
+            Constraint::Length(board_height),
             Constraint::Length(input_height + 2),
         ])
         .areas(frame.area());
+        frame.render_widget(
+            Paragraph::new(self.board.as_str())
+                .dark_gray()
+                .block(Block::new().padding(Padding::horizontal(1))),
+            board,
+        );
 
         frame.render_widget(
             Line::from(vec![
@@ -353,7 +380,8 @@ impl App {
             (Color::Cyan, String::new())
         };
         let mut hints =
-            "enter send · alt+enter newline · /new · ↑↓ pgup pgdn scroll · ctrl+c quit ".to_owned();
+            "enter send · alt+enter newline · /new · /crab · ↑↓ pgup pgdn scroll · ctrl+c quit "
+                .to_owned();
         if self.scroll > 0 {
             hints = format!("↓ {} more lines · {hints}", self.scroll);
         }

@@ -2,13 +2,17 @@
 //! with its own role, task, and history, that work in parallel with the read-only web and file
 //! tools and report back. The orchestrator reads the reports and sends further waves as needed.
 
+use std::hash::{BuildHasher, RandomState};
+use std::time::Duration;
+
 use anyhow::Result;
 use futures::StreamExt;
 use rig_core::completion::{CompletionRequest, ToolDefinition};
 use rig_core::message::{AssistantContent, Message, ToolCall, ToolResultContent, UserContent};
 use serde_json::{Value, json};
+use tokio::sync::mpsc;
 
-use crate::agent::{Io, Model, request};
+use crate::agent::{self, Io, Model};
 use crate::config::Config;
 use crate::fetch::{self, Fetcher};
 use crate::files;
@@ -23,19 +27,142 @@ const CONCURRENCY: usize = 8;
 const AGENT_STEPS: usize = 8;
 /// Characters kept from each report, so a full wave fits the orchestrator's context.
 const MAX_REPORT_CHARS: usize = 1_500;
+/// How often the live board is redrawn; Discord rate-limits message edits.
+const BOARD_EVERY: Duration = Duration::from_millis(1_500);
+/// Characters of a crab's current step shown on the board.
+const MAX_STEP_CHARS: usize = 80;
 
-/// System prompt section, included only when `swarm` is available.
-pub const GUIDANCE: &str = "\
-# Swarm
-For large work that splits into independent parts (broad research, comparing many products or \
-sources, checking a long list of items, surveying a field), act as an orchestrator: call swarm \
-with many subagents at once instead of doing the parts yourself one by one. Scale the swarm to \
-the job: a broad survey can use dozens to 100 subagents in one wave. Give each a short name, a \
-role, and one narrow, self-contained task with all the context it needs, since subagents see \
-nothing but their task. Read the reports, then send another wave for gaps, follow-ups, or fact \
-checks if needed, and finally write the answer yourself, resolving disagreements and naming the \
-URLs it relies on. Don't use swarm for quick questions or for work where each step depends on the \
-last; do those yourself.";
+/// Names handed to crabs, from a random starting point so each swarm meets different ones.
+const CRAB_NAMES: &[&str] = &[
+    "阿鉗",
+    "小黃",
+    "蟹老闆",
+    "橫橫",
+    "大鉗",
+    "毛毛",
+    "泡泡",
+    "夾夾",
+    "蟹寶",
+    "阿橫",
+    "小閘",
+    "閘閘",
+    "蟹蟹",
+    "鉗鉗",
+    "黃金",
+    "膏膏",
+    "蟹黃堡",
+    "大閘",
+    "小毛",
+    "阿蟹",
+    "橫行俠",
+    "鉗子王",
+    "蟹小二",
+    "蟹大俠",
+    "螯螯",
+    "甲甲",
+    "殼殼",
+    "小殼",
+    "硬殼",
+    "青殼",
+    "蟹將軍",
+    "蟹先生",
+    "蟹小姐",
+    "蟹博士",
+    "蟹教授",
+    "蟹探長",
+    "蟹偵探",
+    "蟹隊長",
+    "蟹船長",
+    "蟹師傅",
+    "阿膏",
+    "小膏",
+    "金毛",
+    "絨絨",
+    "毛鉗",
+    "絨鉗",
+    "湖湖",
+    "陽澄",
+    "太湖",
+    "小湖",
+    "蘆葦",
+    "稻稻",
+    "秋秋",
+    "菊菊",
+    "桂花",
+    "黃酒",
+    "薑薑",
+    "醋醋",
+    "蒸蒸",
+    "小蒸",
+    "清蒸",
+    "醉蟹",
+    "蟹粉",
+    "蟹殼黃",
+    "小籠",
+    "湯包",
+    "泡沫",
+    "吐泡",
+    "沙沙",
+    "石縫",
+    "礁礁",
+    "浪浪",
+    "潮潮",
+    "退潮",
+    "漲潮",
+    "月光",
+    "星星",
+    "橫走",
+    "側步",
+    "八腳",
+    "八爪",
+    "雙螯",
+    "鉗哥",
+    "鉗姐",
+    "蟹哥",
+    "蟹姐",
+    "蟹弟",
+    "蟹妹",
+    "蟹爺",
+    "蟹奶",
+    "大黃",
+    "二黃",
+    "三毛",
+    "四鉗",
+    "五甲",
+    "六六",
+    "七七",
+    "八八",
+    "九九",
+    "十足",
+];
+
+/// The `n`th crab name; past the end of the list the names come round again, numbered.
+fn crab_name(n: usize) -> String {
+    let base = CRAB_NAMES[n % CRAB_NAMES.len()];
+    match n / CRAB_NAMES.len() {
+        0 => base.to_owned(),
+        lap => format!("{base}{}", lap + 1),
+    }
+}
+
+/// Starts a `/crab` turn, ahead of the user's request.
+pub const COMMAND: &str = "/crab";
+
+/// Put before the request of a `/crab` turn, the only turns that offer `swarm`.
+pub const INSTRUCTION: &str = "\
+[Crab swarm mode (蟹群模式; mitten is a mitten crab), started by the user with /crab.] \
+Act as an orchestrator for the request below: split it into independent parts and call swarm \
+with many subagents at once instead of doing the parts yourself. Scale the swarm to the job: a \
+broad survey can use dozens to 100 subagents in one wave. Give each a role and one narrow, self-contained task with all the context it needs, since subagents see nothing but \
+their task. Read the reports, then send another wave for gaps, follow-ups, or fact checks if \
+needed, and finally write the answer yourself, resolving disagreements and naming the URLs it \
+relies on.";
+
+/// The request after a leading `/crab`, or `None` if `prompt` doesn't start with it.
+pub fn request(prompt: &str) -> Option<&str> {
+    let rest = prompt.trim_start().strip_prefix(COMMAND)?;
+    (rest.is_empty() || rest.starts_with(char::is_whitespace)).then(|| rest.trim())
+}
 
 const AGENT: &str = "\
 You are a subagent in a swarm; an orchestrator gave you one task and will combine your report \
@@ -61,7 +188,6 @@ pub fn tool() -> ToolDefinition {
                     "items": {
                         "type": "object",
                         "properties": {
-                            "name": {"type": "string", "description": "Short label, e.g. PricingResearcher."},
                             "role": {"type": "string", "description": "Who the subagent is and how it should work."},
                             "task": {"type": "string", "description": "One self-contained task with all needed context."},
                         },
@@ -98,31 +224,59 @@ pub async fn run(
     args: &Value,
     io: &mut impl Io,
 ) -> Result<String> {
-    let agents = match parse(args) {
+    let first = usize::try_from(RandomState::new().hash_one(()) % CRAB_NAMES.len() as u64)
+        .unwrap_or_default();
+    let agents = match parse(args, first) {
         Ok(agents) => agents,
         Err(problem) => return Ok(format!("error: {problem}")),
     };
     let total = agents.len();
     io.note(&format!(
-        "🐝 swarm: {total} subagents, {CONCURRENCY} at a time"
+        "🦀 crab swarm: {total} crabs, {CONCURRENCY} at a time"
     ))
     .await?;
+    let mut board = Board::new(agents.iter().map(|agent| agent.name.clone()).collect());
+    let (steps, mut step_rx) = mpsc::unbounded_channel();
     let mut running = futures::stream::iter(agents.into_iter().enumerate())
-        .map(|(index, agent)| async move {
-            let report = work(model, tools, now, &agent).await;
-            (index, agent.name, report)
+        .map(|(index, agent)| {
+            let steps = steps.clone();
+            async move {
+                let step = |text: String| {
+                    // The board only goes away after every crab is done, so a send can't fail
+                    // in a way that matters.
+                    let _ = steps.send((index, Some(text)));
+                };
+                let report = work(model, tools, now, &agent, step).await;
+                let _ = steps.send((index, None));
+                (index, format!("{}: {}", agent.name, agent.task), report)
+            }
         })
         .buffer_unordered(CONCURRENCY);
-    // Report about every tenth of the swarm, so a big one doesn't flood the chat.
-    let every = total.div_ceil(10);
+    let mut redraw = tokio::time::interval(BOARD_EVERY);
     let mut reports = Vec::with_capacity(total);
-    while let Some(finished) = running.next().await {
-        reports.push(finished);
-        let done = reports.len();
-        if done % every == 0 || done == total {
-            io.note(&format!("🐝 {done}/{total} done")).await?;
+    let mut changed = false;
+    loop {
+        tokio::select! {
+            finished = running.next() => match finished {
+                Some(finished) => reports.push(finished),
+                None => break,
+            },
+            Some((index, step)) = step_rx.recv() => {
+                board.set(index, step);
+                changed = true;
+            }
+            _ = redraw.tick(), if changed => {
+                io.board(&board.render()).await?;
+                changed = false;
+            }
         }
     }
+    drop(running);
+    while let Ok((index, step)) = step_rx.try_recv() {
+        board.set(index, step);
+    }
+    io.board(&board.render()).await?;
+    io.board("").await?;
     reports.sort_by_key(|(index, ..)| *index);
     Ok(reports
         .into_iter()
@@ -131,7 +285,8 @@ pub async fn run(
         .join("\n\n"))
 }
 
-fn parse(args: &Value) -> Result<Vec<Agent>, String> {
+/// Crabs are named from `crab_name(first)` on.
+fn parse(args: &Value, first: usize) -> Result<Vec<Agent>, String> {
     let list = args["agents"]
         .as_array()
         .filter(|list| !list.is_empty())
@@ -149,12 +304,8 @@ fn parse(args: &Value) -> Result<Vec<Agent>, String> {
             if task.is_empty() {
                 return Err(format!("subagent {} has no task", index + 1));
             }
-            let name = match field("name") {
-                "" => format!("agent-{}", index + 1),
-                name => name.to_owned(),
-            };
             Ok(Agent {
-                name,
+                name: crab_name(first + index),
                 role: field("role").to_owned(),
                 task: task.to_owned(),
             })
@@ -163,7 +314,14 @@ fn parse(args: &Value) -> Result<Vec<Agent>, String> {
 }
 
 /// One subagent: a small tool loop over its own history, ending in a text report.
-async fn work(model: &Model, tools: Tools<'_>, now: &str, agent: &Agent) -> String {
+/// `step` hears what the crab is doing, for the board.
+async fn work(
+    model: &Model,
+    tools: Tools<'_>,
+    now: &str,
+    agent: &Agent,
+    step: impl Fn(String),
+) -> String {
     let system = if agent.role.is_empty() {
         AGENT.to_owned()
     } else {
@@ -174,7 +332,8 @@ async fn work(model: &Model, tools: Tools<'_>, now: &str, agent: &Agent) -> Stri
         agent.task
     ))];
     let mut last = String::new();
-    for step in 1..=AGENT_STEPS {
+    for round in 1..=AGENT_STEPS {
+        step("💭 thinking".to_owned());
         let response = match model
             .complete(agent_request(tools.config, &system, &messages))
             .await
@@ -201,6 +360,7 @@ async fn work(model: &Model, tools: Tools<'_>, now: &str, agent: &Agent) -> Stri
         let mut results = Vec::new();
         for call in &calls {
             let args = &call.function.arguments;
+            step(describe(&call.function.name, args));
             let output = match call.function.name.as_str() {
                 "web_search" => tools.search.run(args).await,
                 "fetch_url" => tools.fetcher.run(args).await,
@@ -215,7 +375,7 @@ async fn work(model: &Model, tools: Tools<'_>, now: &str, agent: &Agent) -> Stri
                 vec![ToolResultContent::text(output)],
             ));
         }
-        if step + 1 == AGENT_STEPS {
+        if round + 1 == AGENT_STEPS {
             results.push(UserContent::text(
                 "This is your last step: write your report now, without more tool calls.",
             ));
@@ -226,7 +386,7 @@ async fn work(model: &Model, tools: Tools<'_>, now: &str, agent: &Agent) -> Stri
 }
 
 fn agent_request(config: &Config, system: &str, messages: &[Message]) -> CompletionRequest {
-    let mut request = request(config, system, messages, &[]);
+    let mut request = agent::request(config, system, messages, &[]);
     request.tools = vec![
         search::tool(),
         fetch::tool(),
@@ -234,6 +394,74 @@ fn agent_request(config: &Config, system: &str, messages: &[Message]) -> Complet
         files::list_tool(),
     ];
     request
+}
+
+/// What a tool call is doing, in a few words for the board.
+fn describe(tool: &str, args: &Value) -> String {
+    let arg = |key: &str| args[key].as_str().unwrap_or_default().to_owned();
+    match tool {
+        "web_search" => format!("🔎 {}", arg("query")),
+        "fetch_url" => format!("🌐 {}", arg("url")),
+        "read_file" => format!("📄 {}", arg("path")),
+        "list_dir" => format!("📁 {}", arg("path")),
+        other => other.to_owned(),
+    }
+}
+
+/// What every crab in a swarm is doing.
+#[derive(Debug)]
+struct Board {
+    names: Vec<String>,
+    /// Each crab's current step: `None` before it starts, `Some(None)` once done.
+    steps: Vec<Option<Option<String>>>,
+}
+
+impl Board {
+    fn new(names: Vec<String>) -> Self {
+        let steps = vec![None; names.len()];
+        Self { names, steps }
+    }
+
+    /// `step` is the crab's new step, or `None` when it is done.
+    fn set(&mut self, index: usize, step: Option<String>) {
+        if let Some(slot) = self.steps.get_mut(index) {
+            *slot = Some(step);
+        }
+    }
+
+    /// A summary line, then one line per working crab; the rest only count.
+    fn render(&self) -> String {
+        let done = self
+            .steps
+            .iter()
+            .filter(|s| matches!(s, Some(None)))
+            .count();
+        let working: Vec<String> = self
+            .names
+            .iter()
+            .zip(&self.steps)
+            .filter_map(|(name, step)| {
+                let step: String = step
+                    .as_ref()?
+                    .as_ref()?
+                    .chars()
+                    .take(MAX_STEP_CHARS)
+                    .collect();
+                Some(format!("🦀 {name}: {step}"))
+            })
+            .collect();
+        let waiting = self.steps.len() - done - working.len();
+        let mut text = format!(
+            "🦀 crab swarm: {done}/{} done, {} working, {waiting} waiting",
+            self.steps.len(),
+            working.len()
+        );
+        for line in working {
+            text.push('\n');
+            text.push_str(&line);
+        }
+        text
+    }
 }
 
 /// `report` cut to `MAX_REPORT_CHARS`, marked when cut.
@@ -250,30 +478,54 @@ mod tests {
 
     #[test]
     fn parse_names_agents_and_rejects_bad_waves() {
-        let agents = parse(&json!({"agents": [
-            {"name": " Pricing ", "role": "analyst", "task": " compare plans "},
-            {"task": "check dates"},
-        ]}))
+        let agents = parse(
+            &json!({"agents": [
+                {"role": "analyst", "task": " compare plans "},
+                {"task": "check dates"},
+            ]}),
+            CRAB_NAMES.len() - 1,
+        )
         .unwrap_or_default();
         assert_eq!(
             agents,
             [
                 Agent {
-                    name: "Pricing".into(),
+                    name: "十足".into(),
                     role: "analyst".into(),
                     task: "compare plans".into()
                 },
                 Agent {
-                    name: "agent-2".into(),
+                    name: "阿鉗2".into(),
                     role: String::new(),
                     task: "check dates".into()
                 },
             ]
         );
-        assert!(parse(&json!({"agents": []})).is_err());
-        assert!(parse(&json!({"agents": [{"name": "x"}]})).is_err());
+        assert!(parse(&json!({"agents": []}), 0).is_err());
+        assert!(parse(&json!({"agents": [{"role": "x"}]}), 0).is_err());
         let too_many = vec![json!({"task": "t"}); MAX_AGENTS + 1];
-        assert!(parse(&json!({ "agents": too_many })).is_err());
+        assert!(parse(&json!({ "agents": too_many }), 0).is_err());
+    }
+
+    #[test]
+    fn request_reads_only_a_leading_crab_command() {
+        assert_eq!(request("/crab compare plans"), Some("compare plans"));
+        assert_eq!(request(" /crab\n list "), Some("list"));
+        assert_eq!(request("/crab"), Some(""));
+        assert_eq!(request("/crabby"), None);
+        assert_eq!(request("ask /crab"), None);
+    }
+
+    #[test]
+    fn board_lists_working_crabs_and_counts_the_rest() {
+        let mut board = Board::new(vec!["阿鉗".into(), "小黃".into(), "蟹老闆".into()]);
+        board.set(0, Some("🔎 llm prices".into()));
+        board.set(1, Some("💭 thinking".into()));
+        board.set(1, None);
+        assert_eq!(
+            board.render(),
+            "🦀 crab swarm: 1/3 done, 1 working, 1 waiting\n🦀 阿鉗: 🔎 llm prices"
+        );
     }
 
     #[test]

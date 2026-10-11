@@ -49,6 +49,11 @@ pub trait Io {
     async fn ran(&mut self, _output: &str, _ok: bool) -> Result<()> {
         Ok(())
     }
+    /// Shows a live status board in place of the previous one, e.g. what each swarm crab is
+    /// doing; an empty `text` lets the board go. Calls come at most every second or so.
+    async fn board(&mut self, _text: &str) -> Result<()> {
+        Ok(())
+    }
 }
 
 type AnthropicModel = <anthropic::Client as CompletionClient>::CompletionModel;
@@ -200,7 +205,7 @@ async fn system_prompt(db: &Db, key: &str, config: &Config, user: Option<u64>) -
     let memories = db.memories(user).await.context("failed to load memory")?;
     let skills = db.skills().await.context("failed to load skills")?;
     let mut tools = if config.search.is_some() {
-        format!("{}\n\n{}\n\n", search::GUIDANCE, swarm::GUIDANCE)
+        format!("{}\n\n", search::GUIDANCE)
     } else {
         String::new()
     };
@@ -296,7 +301,6 @@ pub(crate) fn request(
         ]
         .into_iter()
         .chain(config.search.is_some().then(search::tool))
-        .chain(config.search.is_some().then(swarm::tool))
         .chain(config.claude_code.as_ref().map(claude_code::tool))
         .chain(extra.iter().cloned())
         .collect(),
@@ -326,6 +330,8 @@ pub struct Agent {
     key: String,
     /// Who sent the current turn: a Discord user ID, or `None` for the terminal. Picks the memory.
     user: Option<u64>,
+    /// Whether the current turn started with `/crab`; only those turns offer `swarm`.
+    crab: bool,
     system: String,
     messages: Vec<Message>,
 }
@@ -354,6 +360,7 @@ impl Agent {
             mcp,
             key: key.to_owned(),
             user: None,
+            crab: false,
             system,
             messages,
         })
@@ -626,6 +633,26 @@ impl Agent {
         user: Option<u64>,
         io: &mut impl Io,
     ) -> Result<()> {
+        let crab_request = swarm::request(prompt);
+        let crab_prompt;
+        let prompt = match crab_request {
+            Some("") => {
+                return io
+                    .say("usage: /crab <request>, e.g. /crab compare the prices of the main LLM APIs")
+                    .await;
+            }
+            Some(_) if self.search.is_none() => {
+                return io
+                    .say("/crab needs web search; set it up in `mitten configure`")
+                    .await;
+            }
+            Some(request) => {
+                crab_prompt = format!("{}\n\n{request}", swarm::INSTRUCTION);
+                crab_prompt.as_str()
+            }
+            None => prompt,
+        };
+        self.crab = crab_request.is_some();
         self.reload()?;
         self.user = user;
         self.system = system_prompt(&self.db, &self.key, &self.config, user).await?;
@@ -735,6 +762,7 @@ impl Agent {
             .schedules()
             .then(cron::tool)
             .into_iter()
+            .chain(self.crab.then(swarm::tool))
             .chain(self.mcp.tools().iter().cloned())
             .collect();
         loop {
@@ -809,7 +837,7 @@ impl Agent {
                     "web_search" if self.search.is_some() => {
                         self.web_search(&call.function.arguments, io).await?
                     }
-                    "swarm" => match &self.search {
+                    "swarm" if self.crab => match &self.search {
                         Some(search) => {
                             let tools = swarm::Tools {
                                 config: &self.config,

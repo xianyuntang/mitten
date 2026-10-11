@@ -42,7 +42,7 @@ mitten             # chat in the terminal
 `mitten configure` asks for your API key and model, tests the connection, and writes
 `~/.config/mitten/config.toml`. Only the **Model** page is required.
 
-In the terminal chat, `/new` starts a fresh conversation and `/exit` (or Ctrl-C) quits.
+In the terminal chat, `/new` starts a fresh conversation, `/crab <request>` starts a crab swarm (see `swarm` under Tools), and `/exit` (or Ctrl-C) quits.
 Conversations are saved, so the next `mitten` picks up where you left off.
 
 ## Discord
@@ -67,7 +67,7 @@ How it behaves:
   Idle threads archive after an hour.
 - Each person has their own memory, shared by all of their threads and DMs; the terminal has one
   of its own. Messages from different people are never merged into one turn.
-- 👀 means received, ✅ done, ❌ failed. `/new` starts over in that channel or thread.
+- 👀 means received, ✅ done, ❌ failed. `/new` starts over in that channel or thread, and `/crab <request>` starts a crab swarm.
 - Messages sent in quick succession, or while mitten is still answering, are merged and answered
   once.
 - Images and text files you attach (including the `message.txt` Discord makes from a long
@@ -100,7 +100,7 @@ Logs:
 | `read_file`, `list_dir` | Reads files and lists directories. Hidden paths (like `~/.ssh` or `.env`) and Mitten's own config and database are refused. | No |
 | `fetch_url` | Reads a web page as text, optionally rendered in headless Chrome. Private network addresses are refused. | No |
 | `web_search` | Searches through your SearXNG instance or the Brave Search API (pick one in `mitten configure`), optionally only recent results (`time_range`), news sites (`category`), or a date span (`after`, `before`; on SearXNG only Google engines honor it). Results show their publish date when known. | No |
-| `swarm` | Swarm mode, modeled on Kimi's Agent Swarm: the model acts as an orchestrator and dispatches up to 100 subagents per call, each with its own role and task, 8 running at a time. Subagents use only the read-only tools above and report back; the model sends more waves as needed and writes the answer. Needs web search configured. | No |
+| `swarm` | Crab swarm mode (蟹群模式; mitten is a mitten crab), modeled on Kimi's Agent Swarm and offered only in turns started with `/crab <request>`. The model acts as an orchestrator and dispatches up to 100 named crabs per call, each with its own role and task, 8 running at a time, while a live board shows what each one is doing. Crabs use only the read-only tools above and report back; the model sends more waves as needed and writes the answer. Needs web search configured. | No |
 | `memory` | Saves short notes about the person talking, loaded into their later conversations. | No |
 | `skill` | Loads, saves, or removes skills: saved instructions for recurring tasks, kept in the database and shared by everyone. Their names and descriptions are listed in every conversation; the model loads one when a task matches, and offers to save a finished multi-step task as a new one. | Save and remove |
 | `cron` | Schedules a named prompt to run later, once (`at`) or on a cron expression, in the config's `timezone` (default: this machine's; restart `mitten serve` after changing it). Each run starts a fresh conversation and posts its reply in the Discord channel or thread where the job was made. Discord only; jobs run while `mitten serve` is up, and a run missed while it was down happens once on startup. Approval prompts during a run are denied unless approval is set to auto. A job's instructions are shown when it is made or changed; ask to change its instructions or timing, remove it, or give it a trial run now (posted where the job was made, schedule unchanged). | No |

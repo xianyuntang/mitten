@@ -76,6 +76,10 @@ impl<I: Io, R: Reviewer> Io for Guard<'_, I, R> {
         self.io.note(text).await
     }
 
+    async fn board(&mut self, text: &str) -> Result<()> {
+        self.io.board(text).await
+    }
+
     async fn confirm(&mut self, action: &str) -> Result<bool> {
         let verdict = self
             .reviewer
