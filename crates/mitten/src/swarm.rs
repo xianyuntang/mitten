@@ -27,6 +27,8 @@ const CONCURRENCY: usize = 8;
 const AGENT_STEPS: usize = 8;
 /// Characters kept from each report, so a full wave fits the orchestrator's context.
 const MAX_REPORT_CHARS: usize = 1_500;
+/// Longest one crab may work, so a hung model call or page can't stall the whole swarm.
+const CRAB_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 /// How often the live board is redrawn; Discord rate-limits message edits.
 const BOARD_EVERY: Duration = Duration::from_millis(1_500);
 /// Characters of a crab's current step shown on the board.
@@ -246,7 +248,17 @@ pub async fn run(
                     // in a way that matters.
                     let _ = steps.send((index, Some(text)));
                 };
-                let report = work(model, tools, now, &agent, step).await;
+                let report = tokio::time::timeout(
+                    CRAB_TIMEOUT,
+                    work(model, tools, now, &agent, step),
+                )
+                .await
+                .unwrap_or_else(|_| {
+                    format!(
+                        "error: this crab timed out after {} minutes and its findings were lost",
+                        CRAB_TIMEOUT.as_secs() / 60
+                    )
+                });
                 let _ = steps.send((index, None));
                 (index, format!("{}: {}", agent.name, agent.task), report)
             }

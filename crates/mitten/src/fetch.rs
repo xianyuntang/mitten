@@ -31,6 +31,11 @@ const MAX_REDIRECTS: usize = 5;
 const WIDTH: usize = 100;
 /// Whole budget for a headless render: launch, load, and settle.
 const RENDER_TIMEOUT: Duration = Duration::from_secs(40);
+/// Longest a render may take in all, launch and cleanup included, in case Chrome hangs outside
+/// the steps `RENDER_TIMEOUT` covers.
+const RENDER_LIMIT: Duration = Duration::from_secs(90);
+/// How long closing Chrome may take before it is left to be killed on drop.
+const CLOSE_TIMEOUT: Duration = Duration::from_secs(5);
 /// Extra wait after the load event for scripts that fill the page late.
 // ponytail: fixed settle time; wait on network idle if pages come back half-filled.
 const SETTLE: Duration = Duration::from_secs(2);
@@ -102,7 +107,14 @@ impl Fetcher {
             .and_then(|n| usize::try_from(n).ok())
             .unwrap_or(0);
         let fetched = if args["render"].as_bool().unwrap_or(false) {
-            render(url).await
+            tokio::time::timeout(RENDER_LIMIT, render(url))
+                .await
+                .unwrap_or_else(|_| {
+                    Err(anyhow!(
+                        "rendering timed out after {}s",
+                        RENDER_LIMIT.as_secs()
+                    ))
+                })
         } else {
             self.fetch(url).await
         };
@@ -208,10 +220,12 @@ async fn render(url: &str) -> Result<(String, String)> {
     })
     .await;
 
-    if let Err(err) = browser.close().await {
-        tracing::debug!("failed to close Chrome: {err}");
+    match tokio::time::timeout(CLOSE_TIMEOUT, browser.close()).await {
+        Ok(Err(err)) => tracing::debug!("failed to close Chrome: {err}"),
+        Err(_) => tracing::warn!("Chrome did not close in time"),
+        Ok(Ok(_)) => {}
     }
-    let _ = browser.wait().await;
+    let _ = tokio::time::timeout(CLOSE_TIMEOUT, browser.wait()).await;
     driver.abort();
     let _ = std::fs::remove_dir_all(&profile);
     let (final_url, html) = rendered
