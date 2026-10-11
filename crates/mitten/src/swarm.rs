@@ -145,12 +145,12 @@ fn crab_name(n: usize) -> String {
     }
 }
 
-/// Starts a `/crab` turn, ahead of the user's request.
-pub const COMMAND: &str = "/crab";
+/// Starts a `/cast` turn, ahead of the user's request.
+pub const COMMAND: &str = "/cast";
 
-/// Put before the request of a `/crab` turn, the only turns that offer `swarm`.
+/// Put before the request of a `/cast` turn, the only turns that offer `swarm`.
 pub const INSTRUCTION: &str = "\
-[Crab swarm mode (蟹群模式; mitten is a mitten crab), started by the user with /crab.] \
+[Cast of crabs mode (螃蟹群; a group of crabs is a cast, and mitten is a mitten crab), started by the user with /cast.] \
 Act as an orchestrator for the request below: split it into independent parts and call swarm \
 with many subagents at once instead of doing the parts yourself. Scale the swarm to the job: a \
 broad survey can use dozens to 100 subagents in one wave. Give each a role and one narrow, self-contained task with all the context it needs, since subagents see nothing but \
@@ -158,7 +158,7 @@ their task. Read the reports, then send another wave for gaps, follow-ups, or fa
 needed, and finally write the answer yourself, resolving disagreements and naming the URLs it \
 relies on.";
 
-/// The request after a leading `/crab`, or `None` if `prompt` doesn't start with it.
+/// The request after a leading `/cast`, or `None` if `prompt` doesn't start with it.
 pub fn request(prompt: &str) -> Option<&str> {
     let rest = prompt.trim_start().strip_prefix(COMMAND)?;
     (rest.is_empty() || rest.starts_with(char::is_whitespace)).then(|| rest.trim())
@@ -232,7 +232,7 @@ pub async fn run(
     };
     let total = agents.len();
     io.note(&format!(
-        "🦀 crab swarm: {total} crabs, {CONCURRENCY} at a time"
+        "🦀 cast of crabs: {total} crabs, {CONCURRENCY} at a time"
     ))
     .await?;
     let mut board = Board::new(agents.iter().map(|agent| agent.name.clone()).collect());
@@ -452,7 +452,7 @@ impl Board {
             .collect();
         let waiting = self.steps.len() - done - working.len();
         let mut text = format!(
-            "🦀 crab swarm: {done}/{} done, {} working, {waiting} waiting",
+            "🦀 cast of crabs: {done}/{} done, {} working, {waiting} waiting",
             self.steps.len(),
             working.len()
         );
@@ -508,12 +508,12 @@ mod tests {
     }
 
     #[test]
-    fn request_reads_only_a_leading_crab_command() {
-        assert_eq!(request("/crab compare plans"), Some("compare plans"));
-        assert_eq!(request(" /crab\n list "), Some("list"));
-        assert_eq!(request("/crab"), Some(""));
-        assert_eq!(request("/crabby"), None);
-        assert_eq!(request("ask /crab"), None);
+    fn request_reads_only_a_leading_cast_command() {
+        assert_eq!(request("/cast compare plans"), Some("compare plans"));
+        assert_eq!(request(" /cast\n list "), Some("list"));
+        assert_eq!(request("/cast"), Some(""));
+        assert_eq!(request("/castle"), None);
+        assert_eq!(request("ask /cast"), None);
     }
 
     #[test]
@@ -524,7 +524,7 @@ mod tests {
         board.set(1, None);
         assert_eq!(
             board.render(),
-            "🦀 crab swarm: 1/3 done, 1 working, 1 waiting\n🦀 阿鉗: 🔎 llm prices"
+            "🦀 cast of crabs: 1/3 done, 1 working, 1 waiting\n🦀 阿鉗: 🔎 llm prices"
         );
     }
 

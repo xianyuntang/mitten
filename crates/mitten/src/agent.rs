@@ -330,8 +330,8 @@ pub struct Agent {
     key: String,
     /// Who sent the current turn: a Discord user ID, or `None` for the terminal. Picks the memory.
     user: Option<u64>,
-    /// Whether the current turn started with `/crab`; only those turns offer `swarm`.
-    crab: bool,
+    /// Whether the current turn started with `/cast`; only those turns offer `swarm`.
+    cast: bool,
     system: String,
     messages: Vec<Message>,
 }
@@ -360,7 +360,7 @@ impl Agent {
             mcp,
             key: key.to_owned(),
             user: None,
-            crab: false,
+            cast: false,
             system,
             messages,
         })
@@ -633,26 +633,26 @@ impl Agent {
         user: Option<u64>,
         io: &mut impl Io,
     ) -> Result<()> {
-        let crab_request = swarm::request(prompt);
-        let crab_prompt;
-        let prompt = match crab_request {
+        let cast_request = swarm::request(prompt);
+        let cast_prompt;
+        let prompt = match cast_request {
             Some("") => {
                 return io
-                    .say("usage: /crab <request>, e.g. /crab compare the prices of the main LLM APIs")
+                    .say("usage: /cast <request>, e.g. /cast compare the prices of the main LLM APIs")
                     .await;
             }
             Some(_) if self.search.is_none() => {
                 return io
-                    .say("/crab needs web search; set it up in `mitten configure`")
+                    .say("/cast needs web search; set it up in `mitten configure`")
                     .await;
             }
             Some(request) => {
-                crab_prompt = format!("{}\n\n{request}", swarm::INSTRUCTION);
-                crab_prompt.as_str()
+                cast_prompt = format!("{}\n\n{request}", swarm::INSTRUCTION);
+                cast_prompt.as_str()
             }
             None => prompt,
         };
-        self.crab = crab_request.is_some();
+        self.cast = cast_request.is_some();
         self.reload()?;
         self.user = user;
         self.system = system_prompt(&self.db, &self.key, &self.config, user).await?;
@@ -762,7 +762,7 @@ impl Agent {
             .schedules()
             .then(cron::tool)
             .into_iter()
-            .chain(self.crab.then(swarm::tool))
+            .chain(self.cast.then(swarm::tool))
             .chain(self.mcp.tools().iter().cloned())
             .collect();
         loop {
@@ -837,7 +837,7 @@ impl Agent {
                     "web_search" if self.search.is_some() => {
                         self.web_search(&call.function.arguments, io).await?
                     }
-                    "swarm" if self.crab => match &self.search {
+                    "swarm" if self.cast => match &self.search {
                         Some(search) => {
                             let tools = swarm::Tools {
                                 config: &self.config,
