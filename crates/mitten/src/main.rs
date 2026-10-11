@@ -16,6 +16,7 @@ mod search;
 mod service;
 mod settings;
 mod skill;
+mod swarm;
 
 use std::io::IsTerminal;
 use std::path::PathBuf;

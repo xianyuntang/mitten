@@ -30,6 +30,7 @@ use crate::search;
 use crate::search::WebSearch;
 use crate::settings;
 use crate::skill;
+use crate::swarm;
 
 /// How long a new model gets to answer its test request before a switch is refused.
 const PING_TIMEOUT: Duration = Duration::from_secs(30);
@@ -54,7 +55,7 @@ type AnthropicModel = <anthropic::Client as CompletionClient>::CompletionModel;
 type OpenaiModel = <openai::CompletionsClient as CompletionClient>::CompletionModel;
 
 /// The configured model behind whichever OpenCode Go endpoint it speaks.
-enum Model {
+pub(crate) enum Model {
     Anthropic(AnthropicModel),
     Openai(OpenaiModel),
 }
@@ -101,7 +102,7 @@ impl Model {
         })
     }
 
-    async fn complete(
+    pub(crate) async fn complete(
         &self,
         request: CompletionRequest,
     ) -> Result<CompletionResponse, CompletionError> {
@@ -199,7 +200,7 @@ async fn system_prompt(db: &Db, key: &str, config: &Config, user: Option<u64>) -
     let memories = db.memories(user).await.context("failed to load memory")?;
     let skills = db.skills().await.context("failed to load skills")?;
     let mut tools = if config.search.is_some() {
-        format!("{}\n\n", search::GUIDANCE)
+        format!("{}\n\n{}\n\n", search::GUIDANCE, swarm::GUIDANCE)
     } else {
         String::new()
     };
@@ -272,7 +273,7 @@ fn now(zone: chrono_tz::Tz) -> String {
 }
 
 /// `extra` holds tools beyond the built-in ones, i.e. MCP tools.
-fn request(
+pub(crate) fn request(
     config: &Config,
     system: &str,
     messages: &[Message],
@@ -295,6 +296,7 @@ fn request(
         ]
         .into_iter()
         .chain(config.search.is_some().then(search::tool))
+        .chain(config.search.is_some().then(swarm::tool))
         .chain(config.claude_code.as_ref().map(claude_code::tool))
         .chain(extra.iter().cloned())
         .collect(),
@@ -807,6 +809,19 @@ impl Agent {
                     "web_search" if self.search.is_some() => {
                         self.web_search(&call.function.arguments, io).await?
                     }
+                    "swarm" => match &self.search {
+                        Some(search) => {
+                            let tools = swarm::Tools {
+                                config: &self.config,
+                                search,
+                                fetcher: &self.fetcher,
+                            };
+                            let now = now(self.config.timezone);
+                            swarm::run(&self.model, tools, &now, &call.function.arguments, io)
+                                .await?
+                        }
+                        None => "error: swarm needs web search configured".to_owned(),
+                    },
                     other => match self.mcp.call(other, &call.function.arguments, io).await {
                         Some(output) => output?,
                         None => format!("error: unknown tool `{other}`"),
