@@ -42,7 +42,7 @@ mitten             # chat in the terminal
 `mitten configure` asks for your API key and model, tests the connection, and writes
 `~/.config/mitten/config.toml`. Only the **Model** page is required.
 
-In the terminal chat, `/new` starts a fresh conversation, `/cast <request>` sends out a cast of crabs (see `swarm` under Tools), and `/exit` (or Ctrl-C) quits.
+In the terminal chat, `/new` starts a fresh conversation, `/cast <request>` sends out a cast of crabs (see `cast_crabs` under Tools), and `/exit` (or Ctrl-C) quits.
 Conversations are saved, so the next `mitten` picks up where you left off.
 
 ## Discord
@@ -70,8 +70,9 @@ How it behaves:
 - 👀 means received, ✅ done, ❌ failed. `/new` starts over in that channel or thread, and `/cast <request>` sends out a cast of crabs.
 - Messages sent in quick succession, or while mitten is still answering, are merged and answered
   once.
-- Images and text files you attach (including the `message.txt` Discord makes from a long
-  paste) go to the model.
+- Images, text files (including the `message.txt` Discord makes from a long paste), and PDF,
+  Word (`.docx`), and PowerPoint (`.pptx`) documents you attach go to the model; documents as
+  their text, up to 50,000 characters.
 - Approvals show up as **Run** and **Deny** buttons.
 
 ## Running in the background
@@ -97,10 +98,10 @@ Logs:
 
 | Tool | What it does | Needs approval |
 | --- | --- | --- |
-| `read_file`, `list_dir` | Reads files and lists directories. Hidden paths (like `~/.ssh` or `.env`) and Mitten's own config and database are refused. | No |
-| `fetch_url` | Reads a web page as text, optionally rendered in headless Chrome. Private network addresses are refused. | No |
+| `read_file`, `list_dir` | Reads files, including the text of PDF, `.docx`, and `.pptx` documents up to 20 MB, and lists directories. Hidden paths (like `~/.ssh` or `.env`) and Mitten's own config and database are refused. | No |
+| `fetch_url` | Reads a web page as text, optionally rendered in headless Chrome, or a linked PDF, `.docx`, or `.pptx` document up to 20 MB. Private network addresses are refused. | No |
 | `web_search` | Searches through your SearXNG instance or the Brave Search API (pick one in `mitten configure`), optionally only recent results (`time_range`), news sites (`category`), or a date span (`after`, `before`; on SearXNG only Google engines honor it). Results show their publish date when known. | No |
-| `swarm` | Cast of crabs mode (螃蟹群; a group of crabs is a cast, and mitten is a mitten crab), modeled on Kimi's Agent Swarm and used when the model judges a task big enough, or whenever a message starts with `/cast <request>`. The model acts as an orchestrator and dispatches up to 100 named crabs per call, each with its own role and task, 8 running at a time, while a live board shows what each one is doing. Crabs use only the read-only tools above and report back; the model sends more waves as needed and writes the answer. Needs web search configured. | No |
+| `cast_crabs` | Cast of crabs mode (螃蟹群; a group of crabs is a cast, and mitten is a mitten crab), modeled on Kimi's Agent Swarm and used when the model judges a task big enough, or whenever a message starts with `/cast <request>`. The model acts as an orchestrator and dispatches up to 100 named crabs per call, each with its own role and task, 8 running at a time, while a live board shows what each one is doing. Crabs use only the read-only tools above and report back; the model sends more waves as needed and writes the answer. Needs web search configured. | No |
 | `memory` | Saves short notes about the person talking, loaded into their later conversations. | No |
 | `skill` | Loads, saves, or removes skills: saved instructions for recurring tasks, kept in the database and shared by everyone. Their names and descriptions are listed in every conversation; the model loads one when a task matches, and offers to save a finished multi-step task as a new one. | Save and remove |
 | `cron` | Schedules a named prompt to run later, once (`at`) or on a cron expression, in the config's `timezone` (default: this machine's; restart `mitten serve` after changing it). Each run starts a fresh conversation and posts its reply in the Discord channel or thread where the job was made. Discord only; jobs run while `mitten serve` is up, and a run missed while it was down happens once on startup. Approval prompts during a run are denied unless approval is set to auto. A job's instructions are shown when it is made or changed; ask to change its instructions or timing, remove it, or give it a trial run now (posted where the job was made, schedule unchanged). | No |

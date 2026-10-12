@@ -21,8 +21,11 @@ use reqwest::redirect::Policy;
 use rig_core::completion::ToolDefinition;
 use serde_json::{Value, json};
 
+use crate::document;
+
 const TIMEOUT: Duration = Duration::from_secs(20);
-/// Bytes read from the response before the rest is ignored.
+/// Bytes of a web page read before the rest is ignored; documents may be up to
+/// `document::MAX_BYTES`, read whole.
 const MAX_BYTES: usize = 3_000_000;
 /// Characters returned per call; `offset` pages through the rest.
 const MAX_CHARS: usize = 15_000;
@@ -148,10 +151,17 @@ impl Fetcher {
         let mut body = Vec::new();
         while let Some(chunk) = response.chunk().await.context("failed to read the page")? {
             body.extend_from_slice(&chunk);
-            if body.len() >= MAX_BYTES {
+            if document::is_document(&body) {
+                if body.len() > document::MAX_BYTES {
+                    bail!("the document is over {} bytes", document::MAX_BYTES);
+                }
+            } else if body.len() >= MAX_BYTES {
                 body.truncate(MAX_BYTES);
                 break;
             }
+        }
+        if document::is_document(&body) {
+            return Ok((final_url, document::extract(body).await?));
         }
         Ok((final_url, to_text(&content_type, &body)?))
     }

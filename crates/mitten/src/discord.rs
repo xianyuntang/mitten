@@ -23,6 +23,7 @@ use crate::agent::{self, Agent, Io};
 use crate::config::Config;
 use crate::cron;
 use crate::db::{Db, Job};
+use crate::document;
 use crate::mcp::Mcp;
 
 const CONFIRM_TIMEOUT: Duration = Duration::from_secs(10 * 60);
@@ -48,6 +49,8 @@ const MAX_THREAD_NAME_CHARS: usize = 80;
 const MAX_IMAGE_BYTES: u32 = 5 * 1024 * 1024;
 /// Largest text attachment read, like the `message.txt` Discord makes from a long paste.
 const MAX_TEXT_BYTES: u32 = 200 * 1024;
+/// Characters of a document attachment's text put in the prompt.
+const MAX_DOCUMENT_CHARS: usize = 50_000;
 
 /// What a channel's agent task receives.
 #[derive(Debug)]
@@ -280,7 +283,7 @@ impl EventHandler for Handler {
         let attachments = msg
             .attachments
             .into_iter()
-            .filter(|a| image_type(a).is_some() || is_text(a))
+            .filter(|a| image_type(a).is_some() || is_text(a) || is_document(a))
             .collect();
         let input = Input::Text {
             content: msg.content,
@@ -710,8 +713,14 @@ fn is_text(attachment: &Attachment) -> bool {
         .is_some_and(|mime| mime.starts_with("text/") || mime.starts_with("application/json"))
 }
 
+/// Whether the attachment is a PDF or Office document to read into the prompt as text.
+fn is_document(attachment: &Attachment) -> bool {
+    document::has_document_name(&attachment.filename)
+}
+
 /// Downloads `attachments` for the model: text files as prompt text to append, images as images.
-/// Files over `MAX_TEXT_BYTES` or `MAX_IMAGE_BYTES` are left out.
+/// Documents become their text, cut to `MAX_DOCUMENT_CHARS`. Files over `MAX_TEXT_BYTES`,
+/// `MAX_IMAGE_BYTES`, or `document::MAX_BYTES` are left out.
 async fn download(
     web: &reqwest::Client,
     attachments: &[Attachment],
@@ -722,6 +731,8 @@ async fn download(
         let media_type = image_type(attachment);
         let limit = if media_type.is_some() {
             MAX_IMAGE_BYTES
+        } else if is_document(attachment) {
+            u32::try_from(document::MAX_BYTES).unwrap_or(u32::MAX)
         } else {
             MAX_TEXT_BYTES
         };
@@ -750,6 +761,12 @@ async fn download(
                 media_type,
                 ..Image::default()
             });
+        } else if is_document(attachment) {
+            let body = match document::extract(bytes.to_vec()).await {
+                Ok(body) => clip(&body, MAX_DOCUMENT_CHARS),
+                Err(err) => format!("(could not read this document: {err:#})"),
+            };
+            text.push_str(&format!("\n\n[{}]\n{body}", attachment.filename));
         } else {
             text.push_str(&format!(
                 "\n\n[{}]\n{}",
@@ -759,6 +776,16 @@ async fn download(
         }
     }
     Ok((text, images))
+}
+
+/// `text` cut to `max` characters, saying how much was left out.
+fn clip(text: &str, max: usize) -> String {
+    let total = text.chars().count();
+    if total <= max {
+        return text.to_owned();
+    }
+    let cut: String = text.chars().take(max).collect();
+    format!("{cut}\n[cut: {max} of {total} characters shown]")
 }
 
 /// Wraps `text` in a code fence, cut to `max` characters, so it can't break out of the fence.

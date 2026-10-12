@@ -832,7 +832,7 @@ impl Agent {
                     "web_search" if self.search.is_some() => {
                         self.web_search(&call.function.arguments, io).await?
                     }
-                    "swarm" => match &self.search {
+                    "cast_crabs" => match &self.search {
                         Some(search) => {
                             let tools = swarm::Tools {
                                 config: &self.config,
@@ -843,7 +843,7 @@ impl Agent {
                             swarm::run(&self.model, tools, &now, &call.function.arguments, io)
                                 .await?
                         }
-                        None => "error: swarm needs web search configured".to_owned(),
+                        None => "error: cast_crabs needs web search configured".to_owned(),
                     },
                     other => match self.mcp.call(other, &call.function.arguments, io).await {
                         Some(output) => output?,

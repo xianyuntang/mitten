@@ -9,10 +9,11 @@ use rig_core::completion::ToolDefinition;
 use serde_json::{Value, json};
 
 use crate::config::Config;
+use crate::document;
 
 /// Characters returned per `read_file` call; `offset` pages through the rest.
 const MAX_CHARS: usize = 15_000;
-/// Largest file `read_file` opens.
+/// Largest text file `read_file` opens; documents may be up to `document::MAX_BYTES`.
 const MAX_BYTES: u64 = 5_000_000;
 /// Entries listed per `list_dir` call.
 const MAX_ENTRIES: usize = 500;
@@ -77,15 +78,26 @@ pub async fn list(config: &Config, args: &Value) -> String {
 async fn read_text(config: &Config, path: &Value) -> Result<(PathBuf, String)> {
     let path = resolve(config, path).await?;
     let size = tokio::fs::metadata(&path).await?.len();
-    if size > MAX_BYTES {
+    let limit = if document::has_document_name(&path.to_string_lossy()) {
+        document::MAX_BYTES as u64
+    } else {
+        MAX_BYTES
+    };
+    if size > limit {
         bail!(
-            "{} is {size} bytes, over the {MAX_BYTES}-byte limit",
+            "{} is {size} bytes, over the {limit}-byte limit",
             path.display()
         );
     }
     let bytes = tokio::fs::read(&path)
         .await
         .with_context(|| format!("cannot read {}", path.display()))?;
+    if document::is_document(&bytes) {
+        let text = document::extract(bytes)
+            .await
+            .with_context(|| format!("cannot read {}", path.display()))?;
+        return Ok((path, text));
+    }
     let text = String::from_utf8(bytes)
         .with_context(|| format!("{} is not a text file", path.display()))?;
     Ok((path, text))

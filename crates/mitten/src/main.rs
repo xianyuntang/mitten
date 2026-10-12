@@ -6,6 +6,7 @@ mod config;
 mod cron;
 mod db;
 mod discord;
+mod document;
 mod fetch;
 mod files;
 mod mcp;

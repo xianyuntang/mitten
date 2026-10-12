@@ -1,4 +1,4 @@
-//! `swarm` tool: the calling model acts as an orchestrator and dispatches a wave of subagents, each
+//! `cast_crabs` tool: the calling model acts as an orchestrator and dispatches a wave of subagents, each
 //! with its own role, task, and history, that work in parallel with the read-only web and file
 //! tools and report back. The orchestrator reads the reports and sends further waves as needed.
 
@@ -150,20 +150,20 @@ fn crab_name(n: usize) -> String {
 /// Starts a `/cast` turn, ahead of the user's request.
 pub const COMMAND: &str = "/cast";
 
-/// System prompt section, included only when `swarm` is available.
+/// System prompt section, included only when `cast_crabs` is available.
 pub const GUIDANCE: &str = "\
 # Swarm
 For large work that splits into many independent parts (broad research, comparing many products \
-or sources, checking a long list of items), you may call swarm to send out a cast of crabs \
+or sources, checking a long list of items), you may call cast_crabs to send out a cast of crabs \
 (mitten is a mitten crab) that work on the parts in parallel. It is slow and costly, so use it \
 only when the parts are many and each needs its own searching and reading; answer quick \
 questions, and work where each step depends on the last, yourself. The user can also ask for it \
 by starting a message with /cast.";
 
-/// Put before the request of a `/cast` turn, which asks for `swarm` outright.
+/// Put before the request of a `/cast` turn, which asks for `cast_crabs` outright.
 pub const INSTRUCTION: &str = "\
 [Cast of crabs mode (螃蟹群; a group of crabs is a cast, and mitten is a mitten crab), started by the user with /cast.] \
-Act as an orchestrator for the request below: split it into independent parts and call swarm \
+Act as an orchestrator for the request below: split it into independent parts and call cast_crabs \
 with many subagents at once instead of doing the parts yourself. Scale the swarm to the job: a \
 broad survey can use dozens to 100 subagents in one wave. Give each a role and one narrow, self-contained task with all the context it needs, since subagents see nothing but \
 their task. Read the reports, then send another wave for gaps, follow-ups, or fact checks if \
@@ -185,7 +185,7 @@ each claim, and what you could not find or verify. Never fabricate.";
 
 pub fn tool() -> ToolDefinition {
     ToolDefinition {
-        name: "swarm".to_owned(),
+        name: "cast_crabs".to_owned(),
         description: format!(
             "Dispatch a wave of up to {MAX_AGENTS} subagents that work in parallel, each searching \
              the web and reading pages or local files for its own task, and return their reports. \
