@@ -158,7 +158,8 @@ or sources, checking a long list of items), you may call cast_crabs to send out 
 (mitten is a mitten crab) that work on the parts in parallel. It is slow and costly, so use it \
 only when the parts are many and each needs its own searching and reading; answer quick \
 questions, and work where each step depends on the last, yourself. The user can also ask for it \
-by starting a message with /cast.";
+by starting a message with /cast, or by name: when they ask for 螃蟹群, 蟹群, 集群模式, a cast of \
+crabs, or swarm mode, call cast_crabs for that request.";
 
 /// Put before the request of a `/cast` turn, which asks for `cast_crabs` outright.
 pub const INSTRUCTION: &str = "\
