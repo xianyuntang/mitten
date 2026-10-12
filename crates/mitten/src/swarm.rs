@@ -150,7 +150,17 @@ fn crab_name(n: usize) -> String {
 /// Starts a `/cast` turn, ahead of the user's request.
 pub const COMMAND: &str = "/cast";
 
-/// Put before the request of a `/cast` turn, the only turns that offer `swarm`.
+/// System prompt section, included only when `swarm` is available.
+pub const GUIDANCE: &str = "\
+# Swarm
+For large work that splits into many independent parts (broad research, comparing many products \
+or sources, checking a long list of items), you may call swarm to send out a cast of crabs \
+(mitten is a mitten crab) that work on the parts in parallel. It is slow and costly, so use it \
+only when the parts are many and each needs its own searching and reading; answer quick \
+questions, and work where each step depends on the last, yourself. The user can also ask for it \
+by starting a message with /cast.";
+
+/// Put before the request of a `/cast` turn, which asks for `swarm` outright.
 pub const INSTRUCTION: &str = "\
 [Cast of crabs mode (螃蟹群; a group of crabs is a cast, and mitten is a mitten crab), started by the user with /cast.] \
 Act as an orchestrator for the request below: split it into independent parts and call swarm \

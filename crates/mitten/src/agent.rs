@@ -205,7 +205,7 @@ async fn system_prompt(db: &Db, key: &str, config: &Config, user: Option<u64>) -
     let memories = db.memories(user).await.context("failed to load memory")?;
     let skills = db.skills().await.context("failed to load skills")?;
     let mut tools = if config.search.is_some() {
-        format!("{}\n\n", search::GUIDANCE)
+        format!("{}\n\n{}\n\n", search::GUIDANCE, swarm::GUIDANCE)
     } else {
         String::new()
     };
@@ -330,8 +330,6 @@ pub struct Agent {
     key: String,
     /// Who sent the current turn: a Discord user ID, or `None` for the terminal. Picks the memory.
     user: Option<u64>,
-    /// Whether the current turn started with `/cast`; only those turns offer `swarm`.
-    cast: bool,
     system: String,
     messages: Vec<Message>,
 }
@@ -360,7 +358,6 @@ impl Agent {
             mcp,
             key: key.to_owned(),
             user: None,
-            cast: false,
             system,
             messages,
         })
@@ -633,9 +630,8 @@ impl Agent {
         user: Option<u64>,
         io: &mut impl Io,
     ) -> Result<()> {
-        let cast_request = swarm::request(prompt);
         let cast_prompt;
-        let prompt = match cast_request {
+        let prompt = match swarm::request(prompt) {
             Some("") => {
                 return io
                     .say("usage: /cast <request>, e.g. /cast compare the prices of the main LLM APIs")
@@ -652,7 +648,6 @@ impl Agent {
             }
             None => prompt,
         };
-        self.cast = cast_request.is_some();
         self.reload()?;
         self.user = user;
         self.system = system_prompt(&self.db, &self.key, &self.config, user).await?;
@@ -762,7 +757,7 @@ impl Agent {
             .schedules()
             .then(cron::tool)
             .into_iter()
-            .chain(self.cast.then(swarm::tool))
+            .chain(self.search.is_some().then(swarm::tool))
             .chain(self.mcp.tools().iter().cloned())
             .collect();
         loop {
@@ -837,7 +832,7 @@ impl Agent {
                     "web_search" if self.search.is_some() => {
                         self.web_search(&call.function.arguments, io).await?
                     }
-                    "swarm" if self.cast => match &self.search {
+                    "swarm" => match &self.search {
                         Some(search) => {
                             let tools = swarm::Tools {
                                 config: &self.config,
