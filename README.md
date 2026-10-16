@@ -72,7 +72,9 @@ How it behaves:
   once.
 - Images, text files (including the `message.txt` Discord makes from a long paste), and PDF,
   Word (`.docx`), and PowerPoint (`.pptx`) documents you attach go to the model; documents as
-  their text, up to 50,000 characters.
+  their text, up to 50,000 characters. A PDF's first 3 pages also go as images, and the model can
+  look at any other page with `view_pdf`, so it sees the tables, figures, and scanned pages its
+  text misses.
 - Approvals show up as **Run** and **Deny** buttons.
 
 ## Running in the background
@@ -100,6 +102,7 @@ Logs:
 | --- | --- | --- |
 | `read_file`, `list_dir` | Reads files, including the text of PDF, `.docx`, and `.pptx` documents up to 20 MB, and lists directories. Hidden paths (like `~/.ssh` or `.env`) and Mitten's own config and database are refused. | No |
 | `fetch_url` | Reads a web page as text, optionally rendered in headless Chrome, or a linked PDF, `.docx`, or `.pptx` document up to 20 MB. Private network addresses are refused. | No |
+| `view_pdf` | Shows the model pages of a local or linked PDF as images, up to 10 per call, for layout, tables, figures, and scans that the text misses. Same path and address rules as `read_file` and `fetch_url`. | No |
 | `web_search` | Searches through your SearXNG instance or the Brave Search API (pick one in `mitten configure`), optionally only recent results (`time_range`), news sites (`category`), or a date span (`after`, `before`; on SearXNG only Google engines honor it). Results show their publish date when known. | No |
 | `cast_crabs` | Cast of crabs mode (螃蟹群; a group of crabs is a cast, and mitten is a mitten crab), modeled on Kimi's Agent Swarm and used when the model judges a task big enough, or whenever a message starts with `/cast <request>`. The model acts as an orchestrator and dispatches up to 100 named crabs per call, each with its own role and task, 8 running at a time, while a live board shows what each one is doing. Crabs use only the read-only tools above and report back; the model sends more waves as needed and writes the answer. Needs web search configured. | No |
 | `memory` | Saves short notes about the person talking, loaded into their later conversations. | No |

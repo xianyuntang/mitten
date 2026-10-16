@@ -7,8 +7,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::{Context as _, Result, bail};
-use base64::Engine as _;
-use rig_core::message::{DocumentSourceKind, Image, ImageMediaType, MimeType as _};
+use rig_core::message::{Image, ImageMediaType, MimeType as _};
 use serenity::all::{
     Attachment, AutoArchiveDuration, ButtonStyle, ChannelId, ChannelType, Client,
     ComponentInteraction, Context, CreateActionRow, CreateAllowedMentions, CreateButton,
@@ -51,6 +50,8 @@ const MAX_IMAGE_BYTES: u32 = 5 * 1024 * 1024;
 const MAX_TEXT_BYTES: u32 = 200 * 1024;
 /// Characters of a document attachment's text put in the prompt.
 const MAX_DOCUMENT_CHARS: usize = 50_000;
+/// Pages of a PDF attachment shown as images up front; `view_pdf` shows the rest on request.
+const PDF_PREVIEW_PAGES: usize = 3;
 
 /// What a channel's agent task receives.
 #[derive(Debug)]
@@ -719,8 +720,8 @@ fn is_document(attachment: &Attachment) -> bool {
 }
 
 /// Downloads `attachments` for the model: text files as prompt text to append, images as images.
-/// Documents become their text, cut to `MAX_DOCUMENT_CHARS`. Files over `MAX_TEXT_BYTES`,
-/// `MAX_IMAGE_BYTES`, or `document::MAX_BYTES` are left out.
+/// Documents become their text, cut to `MAX_DOCUMENT_CHARS`, and a PDF's first pages also come as
+/// images. Files over `MAX_TEXT_BYTES`, `MAX_IMAGE_BYTES`, or `document::MAX_BYTES` are left out.
 async fn download(
     web: &reqwest::Client,
     attachments: &[Attachment],
@@ -754,19 +755,36 @@ async fn download(
             .await
             .with_context(|| format!("failed to download {}", attachment.filename))?;
         if media_type.is_some() {
-            images.push(Image {
-                data: DocumentSourceKind::Base64(
-                    base64::engine::general_purpose::STANDARD.encode(bytes),
-                ),
-                media_type,
-                ..Image::default()
-            });
+            images.push(document::image(&bytes, media_type));
         } else if is_document(attachment) {
             let body = match document::extract(bytes.to_vec()).await {
                 Ok(body) => clip(&body, MAX_DOCUMENT_CHARS),
                 Err(err) => format!("(could not read this document: {err:#})"),
             };
             text.push_str(&format!("\n\n[{}]\n{body}", attachment.filename));
+            if bytes.starts_with(b"%PDF-") {
+                match document::pdf_pages(bytes.to_vec(), 1, PDF_PREVIEW_PAGES).await {
+                    Ok((total, pages)) => {
+                        text.push_str(&format!(
+                            "\n[{} has {total} pages; pages 1-{} are attached as images. Trust \
+                             the images over the text above for layout, tables, and figures. To \
+                             see other pages, call view_pdf with url {}]",
+                            attachment.filename,
+                            pages.len(),
+                            attachment.url
+                        ));
+                        images.extend(
+                            pages
+                                .iter()
+                                .map(|png| document::image(png, Some(ImageMediaType::PNG))),
+                        );
+                    }
+                    Err(err) => tracing::warn!(
+                        "failed to render {} as images: {err:#}",
+                        attachment.filename
+                    ),
+                }
+            }
         } else {
             text.push_str(&format!(
                 "\n\n[{}]\n{}",

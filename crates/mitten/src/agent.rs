@@ -21,6 +21,7 @@ use crate::compact;
 use crate::config::{Api, Config};
 use crate::cron;
 use crate::db::Db;
+use crate::document;
 use crate::fetch::{self, Fetcher};
 use crate::files;
 use crate::mcp::Mcp;
@@ -294,6 +295,7 @@ pub(crate) fn request(
         tools: [
             files::read_tool(),
             files::list_tool(),
+            document::view_tool(),
             memory::tool(),
             skill::tool(),
             fetch::tool(),
@@ -797,6 +799,8 @@ impl Agent {
             }
 
             let mut results = Vec::new();
+            // Images can't go inside a tool result on every provider, so they follow the results.
+            let mut images = Vec::new();
             for call in &calls {
                 let output = match call.function.name.as_str() {
                     "claude_code" => match &self.config.claude_code {
@@ -813,6 +817,16 @@ impl Agent {
                         files::read(&self.config, args).await
                     }
                     "list_dir" => files::list(&self.config, &call.function.arguments).await,
+                    "view_pdf" => {
+                        let args = &call.function.arguments;
+                        if let Some(source) = args["path"].as_str().or(args["url"].as_str()) {
+                            io.note(&format!("🖼️ viewing: {source}")).await?;
+                        }
+                        let (output, pages) =
+                            document::view(&self.config, &self.fetcher, args).await;
+                        images.extend(pages.into_iter().map(UserContent::Image));
+                        output
+                    }
                     "memory" => self.remember(&call.function.arguments, io).await?,
                     "skill" => self.skill(&call.function.arguments, io).await?,
                     "cron" if self.schedules() => self.cron(&call.function.arguments, io).await?,
@@ -858,6 +872,7 @@ impl Agent {
                 ));
             }
             // All tool results go back in a single user message.
+            results.extend(images);
             self.messages.push(Message::User { content: results });
         }
     }

@@ -76,6 +76,20 @@ pub async fn list(config: &Config, args: &Value) -> String {
 }
 
 async fn read_text(config: &Config, path: &Value) -> Result<(PathBuf, String)> {
+    let (path, bytes) = read_bytes(config, path).await?;
+    if document::is_document(&bytes) {
+        let text = document::extract(bytes)
+            .await
+            .with_context(|| format!("cannot read {}", path.display()))?;
+        return Ok((path, text));
+    }
+    let text = String::from_utf8(bytes)
+        .with_context(|| format!("{} is not a text file", path.display()))?;
+    Ok((path, text))
+}
+
+/// The file at the `path` argument, if the tools may open it and it is within the size limit.
+pub async fn read_bytes(config: &Config, path: &Value) -> Result<(PathBuf, Vec<u8>)> {
     let path = resolve(config, path).await?;
     let size = tokio::fs::metadata(&path).await?.len();
     let limit = if document::has_document_name(&path.to_string_lossy()) {
@@ -92,15 +106,7 @@ async fn read_text(config: &Config, path: &Value) -> Result<(PathBuf, String)> {
     let bytes = tokio::fs::read(&path)
         .await
         .with_context(|| format!("cannot read {}", path.display()))?;
-    if document::is_document(&bytes) {
-        let text = document::extract(bytes)
-            .await
-            .with_context(|| format!("cannot read {}", path.display()))?;
-        return Ok((path, text));
-    }
-    let text = String::from_utf8(bytes)
-        .with_context(|| format!("{} is not a text file", path.display()))?;
-    Ok((path, text))
+    Ok((path, bytes))
 }
 
 async fn list_entries(config: &Config, path: &Value) -> Result<String> {

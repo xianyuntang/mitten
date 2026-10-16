@@ -129,6 +129,16 @@ impl Fetcher {
 
     /// Returns the final URL after redirects and the page as text.
     async fn fetch(&self, url: &str) -> Result<(String, String)> {
+        let (final_url, content_type, body) = self.download(url).await?;
+        if document::is_document(&body) {
+            return Ok((final_url, document::extract(body).await?));
+        }
+        Ok((final_url, to_text(&content_type, &body)?))
+    }
+
+    /// Returns the final URL after redirects, the lowercased content type, and the body: whole for
+    /// a document up to `document::MAX_BYTES`, cut to `MAX_BYTES` for anything else.
+    pub async fn download(&self, url: &str) -> Result<(String, String, Vec<u8>)> {
         let url = Url::parse(url).context("not a valid URL")?;
         check_url(&url)?;
         let mut response = self
@@ -160,10 +170,7 @@ impl Fetcher {
                 break;
             }
         }
-        if document::is_document(&body) {
-            return Ok((final_url, document::extract(body).await?));
-        }
-        Ok((final_url, to_text(&content_type, &body)?))
+        Ok((final_url, content_type, body))
     }
 }
 
