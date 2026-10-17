@@ -841,7 +841,9 @@ impl Agent {
                             };
                             io.note(&format!("🌐 {verb}: {url}")).await?;
                         }
-                        self.fetcher.run(args).await
+                        let (output, pages) = self.fetcher.run(args).await;
+                        images.extend(pages.into_iter().map(UserContent::Image));
+                        output
                     }
                     "web_search" if self.search.is_some() => {
                         self.web_search(&call.function.arguments, io).await?

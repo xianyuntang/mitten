@@ -19,6 +19,7 @@ use reqwest::dns::{Addrs, Name, Resolve, Resolving};
 use reqwest::header::CONTENT_TYPE;
 use reqwest::redirect::Policy;
 use rig_core::completion::ToolDefinition;
+use rig_core::message::Image;
 use serde_json::{Value, json};
 
 use crate::document;
@@ -42,6 +43,8 @@ const CLOSE_TIMEOUT: Duration = Duration::from_secs(5);
 /// Extra wait after the load event for scripts that fill the page late.
 // ponytail: fixed settle time; wait on network idle if pages come back half-filled.
 const SETTLE: Duration = Duration::from_secs(2);
+/// A fetched page: final URL, text, and a PDF's preview note and page images.
+type Fetched = (String, String, Option<(String, Vec<Image>)>);
 /// Makes each render's throwaway Chrome profile directory unique.
 static RENDERS: AtomicUsize = AtomicUsize::new(0);
 
@@ -100,10 +103,11 @@ impl Fetcher {
         Ok(Self { client })
     }
 
-    /// Runs one tool call; failures come back as text for the model.
-    pub async fn run(&self, args: &Value) -> String {
+    /// Runs one tool call; failures come back as text for the model. A PDF's first pages come
+    /// back as images too, on the first call for it (`offset` 0).
+    pub async fn run(&self, args: &Value) -> (String, Vec<Image>) {
         let Some(url) = args["url"].as_str().map(str::trim) else {
-            return "error: `url` is required".to_owned();
+            return ("error: `url` is required".to_owned(), Vec::new());
         };
         let offset = args["offset"]
             .as_u64()
@@ -118,22 +122,36 @@ impl Fetcher {
                         RENDER_LIMIT.as_secs()
                     ))
                 })
+                .map(|(final_url, text)| (final_url, text, None))
         } else {
-            self.fetch(url).await
+            self.fetch(url, offset == 0).await
         };
         match fetched {
-            Ok((final_url, text)) => page(&final_url, &text, offset),
-            Err(err) => format!("error: {err:#}"),
+            Ok((final_url, text, preview)) => {
+                let mut out = page(&final_url, &text, offset);
+                let Some((note, images)) = preview else {
+                    return (out, Vec::new());
+                };
+                out.push_str(&format!("\n\n{note}"));
+                (out, images)
+            }
+            Err(err) => (format!("error: {err:#}"), Vec::new()),
         }
     }
 
-    /// Returns the final URL after redirects and the page as text.
-    async fn fetch(&self, url: &str) -> Result<(String, String)> {
+    /// Returns the final URL after redirects, the page as text, and with `preview`, a PDF's
+    /// first pages as images and a note about them.
+    async fn fetch(&self, url: &str, preview: bool) -> Result<Fetched> {
         let (final_url, content_type, body) = self.download(url).await?;
         if document::is_document(&body) {
-            return Ok((final_url, document::extract(body).await?));
+            let preview = if preview && body.starts_with(b"%PDF-") {
+                document::preview(body.clone(), &final_url).await
+            } else {
+                None
+            };
+            return Ok((final_url, document::extract(body).await?, preview));
         }
-        Ok((final_url, to_text(&content_type, &body)?))
+        Ok((final_url, to_text(&content_type, &body)?, None))
     }
 
     /// Returns the final URL after redirects, the lowercased content type, and the body: whole for
@@ -455,9 +473,9 @@ mod tests {
     #[tokio::test]
     async fn hostnames_resolving_to_loopback_are_refused() {
         let fetcher = Fetcher::new().expect("client");
-        let out = fetcher.run(&json!({"url": "http://localhost:9/"})).await;
+        let out = fetcher.run(&json!({"url": "http://localhost:9/"})).await.0;
         assert!(out.starts_with("error:"), "{out}");
-        let out = fetcher.run(&json!({"url": "http://127.0.0.1:9/"})).await;
+        let out = fetcher.run(&json!({"url": "http://127.0.0.1:9/"})).await.0;
         assert!(out.contains("private or local"), "{out}");
     }
 

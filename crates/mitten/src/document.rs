@@ -25,6 +25,8 @@ pub const MAX_BYTES: usize = 20_000_000;
 const MAX_XML_BYTES: u64 = 50_000_000;
 /// Most PDF pages rendered as images at once.
 const MAX_PAGE_IMAGES: usize = 10;
+/// Pages of a PDF shown as images up front; `view_pdf` shows the rest on request.
+const PREVIEW_PAGES: usize = 3;
 /// Longest side of a rendered page in pixels; Anthropic scales larger images down anyway.
 const PAGE_PIXELS: f32 = 1568.0;
 /// Most PNG bytes rendered from one PDF, so the request stays under the API's size limit.
@@ -170,6 +172,31 @@ async fn view_pages(
         .map(|png| image(png, Some(ImageMediaType::PNG)))
         .collect();
     Ok((text, images))
+}
+
+/// The first pages of the PDF in `bytes`, found at `url`, as images, with a note for the model
+/// saying how to see the rest. `None` when it can't be rendered.
+pub async fn preview(bytes: Vec<u8>, url: &str) -> Option<(String, Vec<Image>)> {
+    let (total, pages) = match pdf_pages(bytes, 1, PREVIEW_PAGES).await {
+        Ok(rendered) => rendered,
+        Err(err) => {
+            tracing::warn!("failed to render {url} as images: {err:#}");
+            return None;
+        }
+    };
+    if pages.is_empty() {
+        return None;
+    }
+    let note = format!(
+        "[This PDF has {total} pages; pages 1-{} are attached as images. Trust the images over the \
+         text for layout, tables, and figures. To see other pages, call view_pdf with url {url}]",
+        pages.len()
+    );
+    let images = pages
+        .iter()
+        .map(|png| image(png, Some(ImageMediaType::PNG)))
+        .collect();
+    Some((note, images))
 }
 
 /// `bytes` as a base64 image for the model.

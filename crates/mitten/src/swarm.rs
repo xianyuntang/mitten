@@ -14,6 +14,7 @@ use tokio::sync::mpsc;
 
 use crate::agent::{self, Io, Model};
 use crate::config::Config;
+use crate::document;
 use crate::fetch::{self, Fetcher};
 use crate::files;
 use crate::search::{self, WebSearch};
@@ -180,7 +181,7 @@ pub fn request(prompt: &str) -> Option<&str> {
 const AGENT: &str = "\
 You are a subagent in a swarm; an orchestrator gave you one task and will combine your report \
 with others. Do only your task, using web_search and fetch_url (and read_file or list_dir for \
-local files). Prefer primary and official sources, check dates, and read promising pages rather \
+local files, and view_pdf to look at a PDF's pages). Prefer primary and official sources, check dates, and read promising pages rather \
 than relying on snippets. Reply with a report under 200 words: the findings, the source URL after \
 each claim, and what you could not find or verify. Never fabricate.";
 
@@ -381,12 +382,23 @@ async fn work(
             return last;
         }
         let mut results = Vec::new();
+        // Images can't go inside a tool result on every provider, so they follow the results.
+        let mut images = Vec::new();
         for call in &calls {
             let args = &call.function.arguments;
             step(describe(&call.function.name, args));
             let output = match call.function.name.as_str() {
                 "web_search" => tools.search.run(args).await,
-                "fetch_url" => tools.fetcher.run(args).await,
+                "fetch_url" => {
+                    let (output, pages) = tools.fetcher.run(args).await;
+                    images.extend(pages.into_iter().map(UserContent::Image));
+                    output
+                }
+                "view_pdf" => {
+                    let (output, pages) = document::view(tools.config, tools.fetcher, args).await;
+                    images.extend(pages.into_iter().map(UserContent::Image));
+                    output
+                }
                 "read_file" => files::read(tools.config, args).await,
                 "list_dir" => files::list(tools.config, args).await,
                 other => format!("error: unknown tool `{other}`"),
@@ -398,6 +410,7 @@ async fn work(
                 vec![ToolResultContent::text(output)],
             ));
         }
+        results.extend(images);
         if round + 1 == AGENT_STEPS {
             results.push(UserContent::text(
                 "This is your last step: write your report now, without more tool calls.",
@@ -415,6 +428,7 @@ fn agent_request(config: &Config, system: &str, messages: &[Message]) -> Complet
         fetch::tool(),
         files::read_tool(),
         files::list_tool(),
+        document::view_tool(),
     ];
     request
 }
@@ -427,6 +441,7 @@ fn describe(tool: &str, args: &Value) -> String {
         "fetch_url" => format!("🌐 {}", arg("url")),
         "read_file" => format!("📄 {}", arg("path")),
         "list_dir" => format!("📁 {}", arg("path")),
+        "view_pdf" => format!("🖼️ {}{}", arg("path"), arg("url")),
         other => other.to_owned(),
     }
 }

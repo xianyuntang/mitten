@@ -50,8 +50,6 @@ const MAX_IMAGE_BYTES: u32 = 5 * 1024 * 1024;
 const MAX_TEXT_BYTES: u32 = 200 * 1024;
 /// Characters of a document attachment's text put in the prompt.
 const MAX_DOCUMENT_CHARS: usize = 50_000;
-/// Pages of a PDF attachment shown as images up front; `view_pdf` shows the rest on request.
-const PDF_PREVIEW_PAGES: usize = 3;
 
 /// What a channel's agent task receives.
 #[derive(Debug)]
@@ -762,28 +760,12 @@ async fn download(
                 Err(err) => format!("(could not read this document: {err:#})"),
             };
             text.push_str(&format!("\n\n[{}]\n{body}", attachment.filename));
-            if bytes.starts_with(b"%PDF-") {
-                match document::pdf_pages(bytes.to_vec(), 1, PDF_PREVIEW_PAGES).await {
-                    Ok((total, pages)) => {
-                        text.push_str(&format!(
-                            "\n[{} has {total} pages; pages 1-{} are attached as images. Trust \
-                             the images over the text above for layout, tables, and figures. To \
-                             see other pages, call view_pdf with url {}]",
-                            attachment.filename,
-                            pages.len(),
-                            attachment.url
-                        ));
-                        images.extend(
-                            pages
-                                .iter()
-                                .map(|png| document::image(png, Some(ImageMediaType::PNG))),
-                        );
-                    }
-                    Err(err) => tracing::warn!(
-                        "failed to render {} as images: {err:#}",
-                        attachment.filename
-                    ),
-                }
+            if bytes.starts_with(b"%PDF-")
+                && let Some((note, pages)) =
+                    document::preview(bytes.to_vec(), &attachment.url).await
+            {
+                text.push_str(&format!("\n{note}"));
+                images.extend(pages);
             }
         } else {
             text.push_str(&format!(
