@@ -9,7 +9,7 @@ use ratatui::crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers
 use ratatui::layout::{Constraint, Flex, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style, Stylize};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Clear, List, ListState, Paragraph};
+use ratatui::widgets::{Block, BorderType, Clear, List, ListState, Padding, Paragraph, Wrap};
 use tokio::runtime::Handle;
 
 use crate::agent;
@@ -56,6 +56,8 @@ const AUTO: &str = "Auto (LLM review)";
 const SAME_MODEL: &str = "Same as main model";
 const NEVER_ASK: &str = "Never ask";
 const PING_TIMEOUT: Duration = Duration::from_secs(30);
+/// Frames of the spinner shown while the connection is tested.
+const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
 /// Shows the setup, tests the connection, and saves the config to `path`.
 pub async fn run(path: &Path) -> Result<Config> {
@@ -153,6 +155,10 @@ struct Form {
     mcp_names: Vec<String>,
     /// Configured Discord servers, one Keep / Remove row each after the MCP rows.
     guilds: Vec<(u64, config::GuildRule)>,
+    /// Set once a save was tried, so empty required fields and unfinished steps show as errors.
+    attempted: bool,
+    /// `NO_COLOR` is set: draw without colors, relying on the ✓ ✗ ● ▌ marks.
+    plain: bool,
 }
 
 fn options(values: &[&str]) -> Vec<String> {
@@ -440,6 +446,8 @@ impl Form {
                 }),
             mcp_names,
             guilds,
+            attempted: false,
+            plain: std::env::var_os("NO_COLOR").is_some_and(|v| !v.is_empty()),
         })
     }
 
@@ -547,6 +555,11 @@ impl Form {
                 KeyCode::Char('r') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                     self.reveal = !self.reveal;
                 }
+                KeyCode::Char('s') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    if let Some(config) = self.save(terminal, handle, path)? {
+                        return Ok(Some(config));
+                    }
+                }
                 KeyCode::Enter if self.focus == BUTTON => {
                     if let Some(config) = self.save(terminal, handle, path)? {
                         return Ok(Some(config));
@@ -586,6 +599,7 @@ impl Form {
         handle: &Handle,
         path: &Path,
     ) -> Result<Option<Config>> {
+        self.attempted = true;
         // Steps can be skipped with ←→, so check them all and show the first one with a problem.
         if let Some((step, err)) =
             (0..STEPS.len()).find_map(|step| self.check_step(step).err().map(|err| (step, err)))
@@ -613,12 +627,29 @@ impl Form {
         let config = Config::parse(&text).context("form produced an invalid config")?;
 
         if !self.force_save {
-            self.status = Line::from("testing connection…").yellow();
-            terminal.draw(|frame| self.draw(frame))?;
             let result = handle.block_on(async {
-                tokio::time::timeout(PING_TIMEOUT, agent::ping(&config))
-                    .await
-                    .map_err(|_| anyhow::anyhow!("no reply in {PING_TIMEOUT:?}"))?
+                let ping = tokio::time::timeout(PING_TIMEOUT, agent::ping(&config));
+                tokio::pin!(ping);
+                let mut tick = tokio::time::interval(Duration::from_millis(80));
+                let mut frame = 0;
+                loop {
+                    tokio::select! {
+                        result = &mut ping => {
+                            return result
+                                .map_err(|_| anyhow::anyhow!("no reply in {PING_TIMEOUT:?}"))?;
+                        }
+                        _ = tick.tick() => {
+                            let spin = SPINNER[frame % SPINNER.len()];
+                            frame += 1;
+                            self.status = Line::from(format!(
+                                " {spin} testing connection to {}…",
+                                config.model
+                            ))
+                            .yellow();
+                            terminal.draw(|f| self.draw(f))?;
+                        }
+                    }
+                }
             });
             if let Err(err) = result {
                 self.status = Line::from(format!("✗ {err:#}  (Enter again saves anyway)")).red();
@@ -716,10 +747,7 @@ impl Form {
         if self.fields[GUILD_ADD].value != YES {
             return Ok(guilds);
         }
-        let server = self.required(GUILD_ID)?;
-        let id = server
-            .parse::<u64>()
-            .map_err(|_| format!("`{server}` is not a Discord server ID (digits only)"))?;
+        let id = parse_server_id(&self.required(GUILD_ID)?)?;
         if guilds.iter().any(|g| g.id == id) {
             return Err(format!(
                 "server {id} exists; set it to Remove to replace it"
@@ -868,40 +896,71 @@ impl Form {
 
     fn draw(&mut self, frame: &mut ratatui::Frame) {
         let rows = self.visible();
-        let [steps, body, status, help] = Layout::vertical([
+        // The Save row takes two lines: a gap, then the button.
+        let fields_height = (rows.len() as u16 + 3).max(STEPS.len() as u16 + 2);
+        let [header, main, help_area, status, keys] = Layout::vertical([
             Constraint::Length(1),
-            Constraint::Length(rows.len() as u16 + 3),
+            Constraint::Length(fields_height),
+            Constraint::Length(5),
             Constraint::Length(1),
             Constraint::Length(1),
         ])
         .areas(frame.area());
+        let [sidebar, body] =
+            Layout::horizontal([Constraint::Length(18), Constraint::Fill(1)]).areas(main);
 
-        let tabs: Vec<Span> = STEPS
+        frame.render_widget(
+            Line::from(vec![
+                " mitten ".black().on_cyan().bold(),
+                "configure".bold(),
+            ]),
+            header,
+        );
+        frame.render_widget(
+            Line::from(concat!("v", env!("CARGO_PKG_VERSION"), " "))
+                .dark_gray()
+                .right_aligned(),
+            header,
+        );
+
+        let steps: Vec<Line> = STEPS
             .iter()
             .enumerate()
-            .flat_map(|(i, name)| {
-                let label = format!(" {} {name} ", i + 1);
-                let span = if i == self.step {
-                    label.black().on_cyan().bold()
+            .map(|(step, name)| {
+                let (mark, style) = if step == self.step {
+                    (
+                        "●",
+                        Style::new().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+                    )
+                } else if self.check_step(step).is_ok() {
+                    ("✓", Style::new().fg(Color::Green))
+                } else if self.attempted {
+                    ("✗", Style::new().fg(Color::Red))
                 } else {
-                    label.dark_gray()
+                    ("○", Style::new().fg(Color::DarkGray))
                 };
-                [span, Span::raw(" ")]
+                let bar = if step == self.step { "▌" } else { " " };
+                Line::from(vec![
+                    bar.cyan(),
+                    Span::styled(format!("{mark} {name}"), style),
+                ])
             })
             .collect();
-        frame.render_widget(Line::from(tabs), steps);
+        frame.render_widget(
+            Paragraph::new(steps).block(Block::bordered().border_type(BorderType::Rounded)),
+            sidebar,
+        );
 
         let mut lines: Vec<Line> = Vec::new();
         let mut menu_anchor = None;
         for (row, &i) in rows.iter().enumerate() {
             let focused = i == self.focus;
             if i == BUTTON {
-                let label = "[ Save ]";
                 lines.push(Line::default());
                 let button = if focused {
-                    label.black().on_cyan().bold()
+                    " Save ".black().on_cyan().bold()
                 } else {
-                    label.cyan()
+                    " Save ".cyan().on_dark_gray()
                 };
                 lines.push(Line::from(vec![Span::raw("  "), button]));
                 continue;
@@ -927,27 +986,79 @@ impl Form {
             if focused {
                 menu_anchor = Some(row as u16);
             }
-            lines.push(Line::from(vec![
-                Span::raw(if focused { "› " } else { "  " }),
+            let error = self.field_error(i);
+            let value_style = if error.is_some() {
+                Style::new().fg(Color::Red)
+            } else {
+                Style::new()
+            };
+            let mark = match error {
+                Some(_) => "  ✗".red(),
+                None if CHECKED.contains(&i) && !field.value.trim().is_empty() => "  ✓".green(),
+                None => Span::raw(""),
+            };
+            let line = Line::from(vec![
+                if focused {
+                    "▌ ".cyan()
+                } else {
+                    Span::raw("  ")
+                },
                 Span::styled(format!("{:<20} ", field.label), label_style),
-                Span::raw(shown),
+                Span::styled(shown, value_style),
                 Span::raw(cursor),
-                Span::raw("  "),
-                hint(i).dark_gray(),
-            ]));
+                mark,
+            ]);
+            lines.push(if focused {
+                line.style(Style::new().bg(FOCUS_BG))
+            } else {
+                line
+            });
         }
-        let title = format!(" mitten configure · {} ", STEPS[self.step]);
         frame.render_widget(
-            Paragraph::new(lines).block(Block::bordered().title(title)),
+            Paragraph::new(lines).block(
+                Block::bordered()
+                    .border_type(BorderType::Rounded)
+                    .border_style(Style::new().fg(Color::Cyan))
+                    .title(format!(" {} ", STEPS[self.step]).bold()),
+            ),
             body,
         );
-        frame.render_widget(Paragraph::new(self.status.clone()), status);
-        let hint = if self.menu.is_some() {
-            "↑↓ choose · Enter select · Esc close"
-        } else {
-            "←→ step · ↑↓ move · Enter open/next · type to edit · ^R show secrets · Esc back · ^C quit"
+
+        let (title, about, warning) = match self.fields.get(self.focus) {
+            Some(field) => {
+                let (about, warning) = help(self.focus);
+                (field.label.as_str(), about, warning)
+            }
+            None => (
+                "Save",
+                "Tests the connection to the model, then writes the config. ^S saves from any field.",
+                "",
+            ),
         };
-        frame.render_widget(Paragraph::new(hint).dark_gray(), help);
+        let mut text = vec![Line::from(about)];
+        if !warning.is_empty() {
+            text.push(Line::from(format!("⚠ {warning}")).yellow());
+        }
+        if let Some(err) = self.field_error(self.focus) {
+            text.push(Line::from(format!("✗ {err}")).red());
+        }
+        frame.render_widget(
+            Paragraph::new(text).wrap(Wrap { trim: true }).block(
+                Block::bordered()
+                    .border_type(BorderType::Rounded)
+                    .border_style(Style::new().fg(Color::DarkGray))
+                    .padding(Padding::horizontal(1))
+                    .title(format!(" {title} ")),
+            ),
+            help_area,
+        );
+        frame.render_widget(Paragraph::new(self.status.clone()), status);
+        let keys_text = if self.menu.is_some() {
+            " ↑↓ choose  Enter select  Esc close"
+        } else {
+            " ←→ step  ↑↓ field  Enter open/next  ^R show secrets  ^S save  Esc back  ^C quit"
+        };
+        frame.render_widget(Paragraph::new(keys_text).dark_gray(), keys);
 
         if let (Some(menu), Some(anchor), Some(Kind::Select(values))) = (
             &mut self.menu,
@@ -956,23 +1067,131 @@ impl Form {
         ) {
             let area = dropdown_area(body, anchor, values.len() as u16);
             let list = List::new(values.iter().map(String::as_str))
-                .block(Block::bordered())
+                .block(Block::bordered().border_type(BorderType::Rounded))
                 .highlight_style(Style::new().black().on_cyan())
                 .highlight_symbol("› ");
             frame.render_widget(Clear, area);
             frame.render_stateful_widget(list, area, menu);
         }
+        if self.plain {
+            for cell in frame.buffer_mut().content.iter_mut() {
+                cell.set_fg(Color::Reset).set_bg(Color::Reset);
+            }
+        }
+    }
+
+    /// What is wrong with field `i`'s value, if anything. Empty required fields only count once
+    /// a save was tried, so a fresh form isn't all red.
+    fn field_error(&self, i: usize) -> Option<String> {
+        if !self.fields.get(i).is_some_and(|_| self.shown(i)) {
+            return None;
+        }
+        let value = self.value(i);
+        if value.is_empty() {
+            let required = matches!(
+                i,
+                KEY | CUSTOM_MODEL
+                    | TOKEN
+                    | USERS
+                    | GUILD_ID
+                    | GUILD_USERS
+                    | SEARCH_URL
+                    | BRAVE_KEY
+                    | MCP_NAME
+                    | MCP_COMMAND
+                    | MCP_URL
+                    | DATABASE
+            );
+            return (self.attempted && required)
+                .then(|| format!("{} is required", self.fields[i].label));
+        }
+        match i {
+            USERS => parse_user_ids(&value).err(),
+            GUILD_ID => parse_server_id(&value).err(),
+            GUILD_USERS if value != "*" => parse_user_ids(&value).err(),
+            TIMEZONE => self.timezone().err(),
+            SEARCH_URL | MCP_URL => (!value.starts_with("http://")
+                && !value.starts_with("https://"))
+            .then(|| "must start with http:// or https://".to_owned()),
+            _ => None,
+        }
     }
 }
 
-/// Gray help shown after field `i`'s value.
-fn hint(i: usize) -> &'static str {
-    match i {
-        USERS => "comma-separated; used in DMs and servers not added below",
-        GUILD_ID => "right-click the server › Copy Server ID",
-        GUILD_USERS => "comma-separated, or * for everyone in the server",
+/// Fields whose value is checked as it is typed, so a valid one gets a ✓.
+const CHECKED: &[usize] = &[USERS, GUILD_ID, GUILD_USERS, TIMEZONE, SEARCH_URL, MCP_URL];
+
+/// Background of the focused row.
+const FOCUS_BG: Color = Color::Indexed(236);
+
+/// Help for field `i`, and a warning to show with it ("" for none).
+fn help(i: usize) -> (&'static str, &'static str) {
+    let about = match i {
+        KEY => "Your OpenCode Go API key. ^R shows it.",
+        MODEL => "The model Mitten talks with. Pick Custom… to type another model ID.",
+        CUSTOM_MODEL => "An OpenCode Go model ID.",
+        DISCORD => "Lets `mitten serve` chat through a Discord bot, by DM and in server channels.",
+        TOKEN => {
+            "Bot token from the Discord Developer Portal › Bot. Turn on Message Content Intent \
+             there too, or the bot cannot connect."
+        }
+        USERS => {
+            "Comma-separated Discord user IDs, used in DMs and in servers not added below. With \
+             Developer Mode on, right-click a name › Copy User ID."
+        }
+        GUILD_ADD => {
+            "Give one server its own users and reply rule. Servers already added are listed \
+             below; set one to Remove to drop or replace it."
+        }
+        GUILD_ID => "With Developer Mode on, right-click the server › Copy Server ID.",
+        GUILD_USERS => "Comma-separated user IDs, or * for everyone in the server.",
+        GUILD_REPLY => {
+            "Every message, or only messages that @mention the bot. Follow-ups in a thread it \
+             is already answering in need no mention."
+        }
+        SEARCH => "Gives the model a web_search tool through SearXNG or the Brave Search API.",
+        SEARCH_URL => "Your SearXNG instance, starting with http:// or https://.",
+        SEARCH_USER | SEARCH_PASSWORD => {
+            "Basic auth for SearXNG, if it needs it. Give both or neither."
+        }
+        BRAVE_KEY => "Your Brave Search API key.",
+        LOG => "How much `mitten serve` logs.",
+        DATABASE => "SQLite file that holds conversations and memory.",
+        MCP_ADD => {
+            "Connect an MCP server, a local command or a remote URL. Its tools reach the model \
+             as <name>__<tool>."
+        }
+        MCP_NAME => "Letters, digits, _ and -. Tools are named <name>__<tool>.",
+        MCP_COMMAND => "The program to start, like npx.",
+        MCP_ARGS => "Arguments, separated by spaces.",
+        MCP_ENV => "Environment variables as KEY=VALUE, separated by commas.",
+        MCP_URL => "The server's URL, starting with http:// or https://.",
+        MCP_TOKEN => "Bearer token for the server, if it needs one.",
+        MCP_APPROVE => "Ask before each of this server's tool calls, or let them run.",
+        APPROVAL => {
+            "Who approves actions like settings changes and Claude Code runs: you every time, or \
+             a reviewer model that passes low-risk ones and asks you about the rest."
+        }
+        REVIEWER => "The model that reviews actions when approval is Auto.",
+        CLAUDE => "Lets the model hand coding work to Claude Code.",
+        CLAUDE_DIRS => "Comma-separated directories Claude Code may work in.",
+        CLAUDE_MODE => "Claude Code's permission mode for the runs Mitten starts.",
+        CLAUDE_TOOLS => {
+            "Comma-separated tools Claude Code may use without asking, like Bash(cargo test:*)."
+        }
+        TIMEZONE => "IANA name like Asia/Taipei, for message times and scheduled jobs.",
+        0 => "Where Mitten's model runs. Only OpenCode Go for now.",
+        _ => "Keep it, or Remove it.",
+    };
+    let warning = match i {
+        GUILD_USERS => {
+            "With *, anyone in the server can make the bot read files on this machine. Only the \
+             main list can approve actions."
+        }
+        MCP_APPROVE => "Never ask lets the model call this server's tools on its own.",
         _ => "",
-    }
+    };
+    (about, warning)
 }
 
 /// Places the dropdown just under field row `row`, aligned with the value column.
@@ -1020,6 +1239,11 @@ fn parse_ids(text: &str, what: &str) -> std::result::Result<Vec<u64>, String> {
                 .map_err(|_| format!("`{part}` is not a Discord {what} ID (digits only)"))
         })
         .collect()
+}
+
+fn parse_server_id(text: &str) -> std::result::Result<u64, String> {
+    text.parse::<u64>()
+        .map_err(|_| format!("`{text}` is not a Discord server ID (digits only)"))
 }
 
 fn parse_user_ids(text: &str) -> std::result::Result<Vec<u64>, String> {
@@ -1411,8 +1635,16 @@ mod tests {
         form.fields[GUILD_ADD].value = YES.to_owned();
         assert!(form.visible().contains(&GUILD_REPLY));
         assert!(form.check_step(form.step).is_err(), "server needs an ID");
+        assert_eq!(
+            form.field_error(GUILD_ID),
+            None,
+            "empty only counts after a save"
+        );
+        form.attempted = true;
+        assert!(form.field_error(GUILD_ID).is_some());
         form.fields[GUILD_ID].value = "x".to_owned();
         form.fields[GUILD_USERS].value = "12".to_owned();
+        assert!(form.field_error(GUILD_ID).is_some());
         assert!(form.check_step(form.step).is_err(), "server ID is digits");
         form.fields[GUILD_ID].value = "100".to_owned();
         form.fields[GUILD_USERS].value = String::new();
@@ -1467,7 +1699,7 @@ mod tests {
             ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 20)).expect("terminal");
         terminal.draw(|frame| form.draw(frame)).expect("draw");
         let screen = format!("{}", terminal.backend());
-        assert!(screen.contains("1 Model"));
+        assert!(screen.contains("● Model"));
         assert!(
             screen.contains("qwen3.8-max"),
             "dropdown lists models:\n{screen}"
