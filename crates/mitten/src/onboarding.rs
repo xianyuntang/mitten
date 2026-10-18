@@ -43,9 +43,9 @@ const STEPS: [&str; 6] = [
     "Advanced",
 ];
 const NO: &str = "No";
-/// Shown in the empty per-server field: `@` after a server ID means only @mentions are answered.
-const GUILDS_EXAMPLE: &str =
-    "e.g. 111@: 12, 34; 222: 12   (server ID: user IDs; @ = needs a mention)";
+const YES: &str = "Yes";
+const EVERY_MESSAGE: &str = "Every message";
+const MENTIONED: &str = "Only when @mentioned";
 const STDIO: &str = "Local command (stdio)";
 const HTTP: &str = "Remote URL (HTTP)";
 const KEEP: &str = "Keep";
@@ -123,9 +123,13 @@ const CLAUDE_MODE: usize = 25;
 const CLAUDE_TOOLS: usize = 26;
 const TIMEZONE: usize = 27;
 const BRAVE_KEY: usize = 28;
-const GUILDS: usize = 29;
-/// First of the rows for already configured MCP servers.
-const MCP_FIRST: usize = 30;
+const GUILD_ADD: usize = 29;
+const GUILD_ID: usize = 30;
+const GUILD_USERS: usize = 31;
+const GUILD_REPLY: usize = 32;
+/// First of the rows for already configured MCP servers, followed by the configured Discord
+/// servers' rows.
+const MCP_FIRST: usize = 33;
 
 /// Focus value for the Save button under the fields.
 const BUTTON: usize = usize::MAX;
@@ -147,6 +151,8 @@ struct Form {
     claude_extra: (u64, String),
     /// Configured MCP servers, one Keep / Remove row each from `MCP_FIRST` on.
     mcp_names: Vec<String>,
+    /// Configured Discord servers, one Keep / Remove row each after the MCP rows.
+    guilds: Vec<(u64, config::GuildRule)>,
 }
 
 fn options(values: &[&str]) -> Vec<String> {
@@ -371,11 +377,17 @@ impl Form {
         ));
         fields.push(field(
             1,
-            "Per-server",
-            Kind::Text,
-            discord
-                .map(|d| format_guilds(&d.guilds))
-                .unwrap_or_default(),
+            "Add server",
+            Kind::Select(options(&[NO, YES])),
+            NO.to_owned(),
+        ));
+        fields.push(field(1, "Server ID", Kind::Text, String::new()));
+        fields.push(field(1, "Server user IDs", Kind::Text, String::new()));
+        fields.push(field(
+            1,
+            "Reply to",
+            Kind::Select(options(&[EVERY_MESSAGE, MENTIONED])),
+            EVERY_MESSAGE.to_owned(),
         ));
         let mcp_names: Vec<String> = current
             .map(|c| c.mcp.keys().cloned().collect())
@@ -386,6 +398,27 @@ impl Form {
                 name,
                 Kind::Select(options(&[KEEP, REMOVE])),
                 KEEP.to_owned(),
+            )
+        }));
+        let guilds: Vec<(u64, config::GuildRule)> = discord
+            .map(|d| d.guilds.clone().into_iter().collect())
+            .unwrap_or_default();
+        fields.extend(guilds.iter().map(|(id, rule)| {
+            let reply = if rule.mention_only {
+                MENTIONED
+            } else {
+                EVERY_MESSAGE
+            };
+            let keep = format!(
+                "{KEEP} · {} · {}",
+                join_ids(&rule.allowed_users),
+                reply.to_lowercase()
+            );
+            field(
+                1,
+                &id.to_string(),
+                Kind::Select(vec![keep.clone(), REMOVE.to_owned()]),
+                keep,
             )
         }));
         Ok(Self {
@@ -403,7 +436,13 @@ impl Form {
                     (c.timeout.as_secs(), c.command.clone())
                 }),
             mcp_names,
+            guilds,
         })
+    }
+
+    /// Index of the first configured Discord server's row.
+    fn guild_first(&self) -> usize {
+        MCP_FIRST + self.mcp_names.len()
     }
 
     fn shown(&self, i: usize) -> bool {
@@ -411,7 +450,11 @@ impl Form {
         field.step == self.step
             && match i {
                 CUSTOM_MODEL => self.fields[MODEL].value == CUSTOM,
-                TOKEN | USERS | GUILDS => self.fields[DISCORD].value == ENABLED,
+                TOKEN | USERS | GUILD_ADD => self.fields[DISCORD].value == ENABLED,
+                GUILD_ID | GUILD_USERS | GUILD_REPLY => {
+                    self.fields[DISCORD].value == ENABLED && self.fields[GUILD_ADD].value == YES
+                }
+                i if i >= self.guild_first() => self.fields[DISCORD].value == ENABLED,
                 SEARCH_URL | SEARCH_USER | SEARCH_PASSWORD => self.fields[SEARCH].value == SEARXNG,
                 BRAVE_KEY => self.fields[SEARCH].value == BRAVE,
                 MCP_NAME | MCP_APPROVE => self.fields[MCP_ADD].value != NO,
@@ -649,8 +692,42 @@ impl Form {
         Ok(Some(DiscordAnswers {
             token: self.required(TOKEN)?,
             allowed_users: parse_user_ids(&self.value(USERS))?,
-            guilds: parse_guilds(&self.value(GUILDS))?,
+            guilds: self.guild_answers()?,
         }))
+    }
+
+    /// Configured servers not set to Remove, plus the one being added.
+    fn guild_answers(&self) -> std::result::Result<Vec<GuildAnswers>, String> {
+        let first = self.guild_first();
+        let mut guilds: Vec<GuildAnswers> = self
+            .guilds
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| self.fields[first + i].value != REMOVE)
+            .map(|(_, (id, rule))| GuildAnswers {
+                id: *id,
+                mention_only: rule.mention_only,
+                allowed_users: rule.allowed_users.clone(),
+            })
+            .collect();
+        if self.fields[GUILD_ADD].value != YES {
+            return Ok(guilds);
+        }
+        let server = self.required(GUILD_ID)?;
+        let id = server
+            .parse::<u64>()
+            .map_err(|_| format!("`{server}` is not a Discord server ID (digits only)"))?;
+        if guilds.iter().any(|g| g.id == id) {
+            return Err(format!(
+                "server {id} exists; set it to Remove to replace it"
+            ));
+        }
+        guilds.push(GuildAnswers {
+            id,
+            mention_only: self.fields[GUILD_REPLY].value == MENTIONED,
+            allowed_users: parse_user_ids(&self.value(GUILD_USERS))?,
+        });
+        Ok(guilds)
     }
 
     fn search(&self) -> std::result::Result<Option<SearchAnswers>, String> {
@@ -844,16 +921,12 @@ impl Form {
             if focused {
                 menu_anchor = Some(row as u16);
             }
-            let mut line = vec![
+            lines.push(Line::from(vec![
                 Span::raw(if focused { "› " } else { "  " }),
-                Span::styled(format!("{:<18}", field.label), label_style),
-            ];
-            if i == GUILDS && shown.is_empty() {
-                line.extend([Span::raw(cursor), GUILDS_EXAMPLE.dark_gray()]);
-            } else {
-                line.extend([Span::raw(shown), Span::raw(cursor)]);
-            }
-            lines.push(Line::from(line));
+                Span::styled(format!("{:<20} ", field.label), label_style),
+                Span::raw(shown),
+                Span::raw(cursor),
+            ]));
         }
         let title = format!(" mitten configure · {} ", STEPS[self.step]);
         frame.render_widget(
@@ -886,7 +959,7 @@ impl Form {
 
 /// Places the dropdown just under field row `row`, aligned with the value column.
 fn dropdown_area(body: Rect, row: u16, items: u16) -> Rect {
-    let x = body.x + 1 + 2 + 18;
+    let x = body.x + 1 + 2 + 21;
     let y = body.y + 1 + row + 1;
     let [area] = Layout::horizontal([Constraint::Length(28)])
         .flex(Flex::Start)
@@ -908,7 +981,7 @@ struct DiscordAnswers {
 /// One `[discord.guilds.<id>]` table.
 struct GuildAnswers {
     id: u64,
-    mention: bool,
+    mention_only: bool,
     allowed_users: Vec<u64>,
 }
 
@@ -917,49 +990,6 @@ fn join_ids(ids: &[u64]) -> String {
         .map(u64::to_string)
         .collect::<Vec<_>>()
         .join(", ")
-}
-
-/// Per-server rules as the form shows them: `ID: user, user; ID@: user`, where `@` after the
-/// server ID means the bot there answers only @mentions.
-fn format_guilds(guilds: &std::collections::BTreeMap<u64, config::GuildRule>) -> String {
-    guilds
-        .iter()
-        .map(|(id, rule)| {
-            let at = if rule.mention { "@" } else { "" };
-            format!("{id}{at}: {}", join_ids(&rule.allowed_users))
-        })
-        .collect::<Vec<_>>()
-        .join("; ")
-}
-
-fn parse_guilds(text: &str) -> std::result::Result<Vec<GuildAnswers>, String> {
-    let mut guilds: Vec<GuildAnswers> = Vec::new();
-    for entry in text.split(';').map(str::trim).filter(|e| !e.is_empty()) {
-        let (guild, users) = entry
-            .split_once(':')
-            .ok_or_else(|| format!("`{entry}` should be `server ID: user IDs`"))?;
-        let guild = guild.trim();
-        let (guild, mention) = match guild.strip_suffix('@') {
-            Some(guild) => (guild.trim(), true),
-            None => (guild, false),
-        };
-        let id = guild
-            .parse::<u64>()
-            .map_err(|_| format!("`{guild}` is not a Discord server ID (digits only)"))?;
-        if guilds.iter().any(|g| g.id == id) {
-            return Err(format!("server {id} is listed twice"));
-        }
-        let allowed_users = parse_ids(users, "user")?;
-        if allowed_users.is_empty() {
-            return Err(format!("server {id} needs at least one user ID"));
-        }
-        guilds.push(GuildAnswers {
-            id,
-            mention,
-            allowed_users,
-        });
-    }
-    Ok(guilds)
 }
 
 /// Comma-separated Discord IDs; `what` names them in errors ("user", "channel").
@@ -1138,8 +1168,8 @@ fn render_toml(answers: &Answers) -> String {
                 guild.id,
                 join_ids(&guild.allowed_users)
             ));
-            if guild.mention {
-                text.push_str("mention = true\n");
+            if guild.mention_only {
+                text.push_str("mention_only = true\n");
             }
         }
     }
@@ -1217,7 +1247,18 @@ mod tests {
             discord: Some(DiscordAnswers {
                 token: "tok".to_owned(),
                 allowed_users: vec![1, 22],
-                guilds: parse_guilds("100@: 2, 3; 200: 1").expect("valid"),
+                guilds: vec![
+                    GuildAnswers {
+                        id: 100,
+                        mention_only: true,
+                        allowed_users: vec![2, 3],
+                    },
+                    GuildAnswers {
+                        id: 200,
+                        mention_only: false,
+                        allowed_users: vec![1],
+                    },
+                ],
             }),
             claude_code: Some(ClaudeAnswers {
                 dirs: vec!["~/repos".to_owned(), "/srv/app".to_owned()],
@@ -1258,9 +1299,21 @@ mod tests {
         assert_eq!(discord.allowed_users, [1, 22]);
         assert_eq!(discord.rule(Some(100)), (&[2, 3][..], true));
         assert_eq!(discord.rule(Some(200)), (&[1][..], false));
-        assert_eq!(format_guilds(&discord.guilds), "100@: 2, 3; 200: 1");
-        let reopened = Form::new(Some(&config)).expect("form");
-        assert_eq!(reopened.fields[GUILDS].value, "100@: 2, 3; 200: 1");
+        let mut reopened = Form::new(Some(&config)).expect("form");
+        let first = reopened.guild_first();
+        assert_eq!(reopened.fields[first].label, "100");
+        assert_eq!(
+            reopened.fields[first].value,
+            "Keep · 2, 3 · only when @mentioned"
+        );
+        reopened.fields[first + 1].value = REMOVE.to_owned();
+        let kept = reopened.guild_answers().expect("valid");
+        assert_eq!(
+            kept.iter()
+                .map(|g| (g.id, g.mention_only, g.allowed_users.clone()))
+                .collect::<Vec<_>>(),
+            [(100, true, vec![2, 3])]
+        );
         let Some(config::Search::Searxng(searxng)) = config.search else {
             panic!("search section");
         };
@@ -1329,12 +1382,18 @@ mod tests {
         form.fields[USERS].value = "12, x".to_owned();
         assert!(form.check_step(form.step).is_err());
         form.fields[USERS].value = "12, 34".to_owned();
-        assert!(form.visible().contains(&GUILDS));
-        for bad in ["100 12", "x: 12", "100: ", "100: 1; 100@: 2"] {
-            form.fields[GUILDS].value = bad.to_owned();
-            assert!(form.check_step(form.step).is_err(), "`{bad}` is invalid");
-        }
-        form.fields[GUILDS].value = "100@: 12; 200: 34".to_owned();
+        assert!(!form.visible().contains(&GUILD_ID));
+        form.fields[GUILD_ADD].value = YES.to_owned();
+        assert!(form.visible().contains(&GUILD_REPLY));
+        assert!(form.check_step(form.step).is_err(), "server needs an ID");
+        form.fields[GUILD_ID].value = "x".to_owned();
+        form.fields[GUILD_USERS].value = "12".to_owned();
+        assert!(form.check_step(form.step).is_err(), "server ID is digits");
+        form.fields[GUILD_ID].value = "100".to_owned();
+        form.fields[GUILD_USERS].value = String::new();
+        assert!(form.check_step(form.step).is_err(), "server needs users");
+        form.fields[GUILD_USERS].value = "12".to_owned();
+        form.fields[GUILD_REPLY].value = MENTIONED.to_owned();
         form.check_step(form.step).expect("discord step valid");
 
         form.step = 2;
@@ -1361,7 +1420,16 @@ mod tests {
 
         let answers = form.answers().expect("all steps valid");
         assert_eq!(answers.model, "qwen-next");
-        assert_eq!(answers.discord.map(|d| d.allowed_users), Some(vec![12, 34]));
+        let discord = answers.discord.expect("discord");
+        assert_eq!(discord.allowed_users, [12, 34]);
+        assert_eq!(
+            discord
+                .guilds
+                .iter()
+                .map(|g| (g.id, g.mention_only))
+                .collect::<Vec<_>>(),
+            [(100, true)]
+        );
     }
 
     #[test]

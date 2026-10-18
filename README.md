@@ -63,12 +63,12 @@ Mitten can answer you in Discord, by DM or in any server channel it can read.
 How it behaves:
 
 - Only the user IDs you list are heard; everyone else is ignored.
-- Each server can have its own list, and can require an @mention, under **Per-server** in
-  `mitten configure`: `111@: 12, 34; 222: 12` lets users 12 and 34 use server 111, where only
-  @mentions are answered, and user 12 use server 222. In config, that is
-  `[discord.guilds.<server ID>]` with `allowed_users` and `mention = true`. Other servers and DMs
-  use the main list. A thread the bot is already answering in needs no further mention until
-  mitten restarts. To copy a server ID, right-click the server with Developer Mode on.
+- Each server can have its own list instead, set under **Add server** on the Discord page of
+  `mitten configure`: the server ID, its user IDs, and whether it replies to every message or
+  only when @mentioned. In config, that is `[discord.guilds.<server ID>]` with `allowed_users`
+  and `mention_only = true`. Other servers and DMs use the main list. A thread the bot is already
+  answering in needs no further mention until mitten restarts. To copy a server ID, right-click
+  the server with Developer Mode on.
 - A message in a server channel opens a thread, and each thread is its own conversation.
   Idle threads archive after an hour.
 - Each person has their own memory, shared by all of their threads and DMs; the terminal has one

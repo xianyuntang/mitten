@@ -393,7 +393,7 @@ impl DiscordSection {
     /// Who may use the bot in `guild` (`None` for DMs), and whether they must @mention it.
     pub fn rule(&self, guild: Option<u64>) -> (&[u64], bool) {
         match guild.and_then(|guild| self.guilds.get(&guild)) {
-            Some(rule) => (&rule.allowed_users, rule.mention),
+            Some(rule) => (&rule.allowed_users, rule.mention_only),
             None => (&self.allowed_users, false),
         }
     }
@@ -407,7 +407,7 @@ pub struct GuildRule {
     pub allowed_users: Vec<u64>,
     /// Answer only messages that @mention the bot, except in a thread it is already answering in.
     #[serde(default)]
-    pub mention: bool,
+    pub mention_only: bool,
 }
 
 /// Validated settings with every default filled in.
@@ -747,7 +747,7 @@ mod tests {
         let base =
             "[opencode-go]\napi_key = \"k\"\n[discord]\ntoken = \"t\"\nallowed_users = [1]\n";
         let config = Config::parse(&format!(
-            "{base}[discord.guilds.100]\nallowed_users = [2, 3]\nmention = true\n\
+            "{base}[discord.guilds.100]\nallowed_users = [2, 3]\nmention_only = true\n\
              [discord.guilds.200]\nallowed_users = [1]\n"
         ))
         .expect("valid");

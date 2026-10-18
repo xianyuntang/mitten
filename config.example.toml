@@ -97,4 +97,4 @@ level = "warn"
 # allowed_users = [123456789012345678, 234567890123456789]
 # # Answer only messages that @mention the bot (default false). Follow-ups in a thread it is
 # # already answering in need no mention until mitten restarts.
-# mention = true
+# mention_only = true
