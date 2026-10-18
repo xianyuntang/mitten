@@ -10,10 +10,10 @@ use anyhow::{Context as _, Result, bail};
 use rig_core::message::{Image, ImageMediaType, MimeType as _};
 use serenity::all::{
     Attachment, AutoArchiveDuration, ButtonStyle, ChannelId, ChannelType, Client,
-    ComponentInteraction, Context, CreateActionRow, CreateAllowedMentions, CreateButton,
-    CreateInteractionResponse, CreateInteractionResponseMessage, CreateMessage, CreateThread,
-    EditMessage, EditThread, EventHandler, GatewayIntents, Http, Interaction, Message, MessageId,
-    Ready,
+    ComponentInteraction, Context, CreateActionRow, CreateAllowedMentions, CreateAttachment,
+    CreateButton, CreateInteractionResponse, CreateInteractionResponseMessage, CreateMessage,
+    CreateThread, EditMessage, EditThread, EventHandler, GatewayIntents, Http, Interaction,
+    Message, MessageId, Ready,
 };
 use serenity::async_trait;
 use tokio::sync::mpsc;
@@ -617,6 +617,13 @@ impl Io for DiscordIo {
         // Notes after the board start a new status message below it.
         self.status = None;
         self.board = Some(self.send(CreateMessage::new().content(body)).await?);
+        Ok(())
+    }
+
+    async fn send_file(&mut self, name: &str, bytes: Vec<u8>) -> Result<()> {
+        self.status = None;
+        self.send(CreateMessage::new().add_file(CreateAttachment::bytes(bytes, name)))
+            .await?;
         Ok(())
     }
 

@@ -80,6 +80,10 @@ impl<I: Io, R: Reviewer> Io for Guard<'_, I, R> {
         self.io.board(text).await
     }
 
+    async fn send_file(&mut self, name: &str, bytes: Vec<u8>) -> Result<()> {
+        self.io.send_file(name, bytes).await
+    }
+
     async fn confirm(&mut self, action: &str) -> Result<bool> {
         let verdict = self
             .reviewer

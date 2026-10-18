@@ -27,7 +27,7 @@ use crate::document;
 const TIMEOUT: Duration = Duration::from_secs(20);
 /// Bytes of a web page read before the rest is ignored; documents may be up to
 /// `document::MAX_BYTES`, read whole.
-const MAX_BYTES: usize = 3_000_000;
+pub const MAX_BYTES: usize = 3_000_000;
 /// Characters returned per call; `offset` pages through the rest.
 const MAX_CHARS: usize = 15_000;
 const MAX_REDIRECTS: usize = 5;

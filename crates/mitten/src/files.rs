@@ -1,4 +1,4 @@
-//! Read-only file tools: `read_file` and `list_dir`. They run without approval, so they refuse
+//! Read-only file tools: `read_file`, `list_dir`, and `send_file`. They run without approval, so they refuse
 //! hidden paths (any component starting with `.`, like `~/.ssh` or `.env`) and Mitten's own config
 //! and database, which hold API keys, tokens, and every conversation.
 
@@ -10,6 +10,7 @@ use serde_json::{Value, json};
 
 use crate::config::Config;
 use crate::document;
+use crate::fetch::{self, Fetcher};
 
 /// Characters returned per `read_file` call; `offset` pages through the rest.
 const MAX_CHARS: usize = 15_000;
@@ -53,6 +54,53 @@ pub fn list_tool() -> ToolDefinition {
             "required": ["path"],
         }),
     }
+}
+
+pub fn send_tool() -> ToolDefinition {
+    ToolDefinition {
+        name: "send_file".to_owned(),
+        description: "Send the user a file as a chat attachment, e.g. an image they asked to see. \
+             Give exactly one of `path` (a file on the user's machine) or `url` (a public file to \
+             download and attach). For a public image, pasting its direct URL in the reply already \
+             shows it inline; use `url` only when the link would not display, like a hotlinked image."
+            .to_owned(),
+        parameters: json!({
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "The file to send."},
+                "url": {"type": "string", "description": "The file to download and send."},
+            },
+        }),
+    }
+}
+
+/// The file a `send_file` call names: a file name for the attachment, and its bytes.
+pub async fn load(config: &Config, fetcher: &Fetcher, args: &Value) -> Result<(String, Vec<u8>)> {
+    let (name, bytes) = match (args["path"].as_str(), args["url"].as_str()) {
+        (Some(_), None) => {
+            let (path, bytes) = read_bytes(config, &args["path"]).await?;
+            let name = path
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned());
+            (name, bytes)
+        }
+        (None, Some(url)) => {
+            let (url, _, bytes) = fetcher.download(url.trim()).await?;
+            if bytes.len() >= fetch::MAX_BYTES {
+                bail!("the file is over {} bytes", fetch::MAX_BYTES);
+            }
+            (url_name(&url), bytes)
+        }
+        _ => bail!("give exactly one of `path` or `url`"),
+    };
+    Ok((name.unwrap_or_else(|| "file".to_owned()), bytes))
+}
+
+/// The last path segment of `url`, e.g. `cat.png`, if it has one.
+fn url_name(url: &str) -> Option<String> {
+    let url = reqwest::Url::parse(url).ok()?;
+    let name = url.path_segments()?.next_back()?;
+    (!name.is_empty()).then(|| name.to_owned())
 }
 
 /// Runs one `read_file` call; failures come back as text for the model.
@@ -204,6 +252,16 @@ mod tests {
         assert!(is_hidden(Path::new("/home/me/.ssh/id_ed25519")));
         assert!(is_hidden(Path::new("/srv/app/.env")));
         assert!(!is_hidden(Path::new("/home/me/notes/todo.md")));
+    }
+
+    #[test]
+    fn url_names_come_from_the_last_segment() {
+        assert_eq!(
+            url_name("https://example.com/img/cat.png?w=200").as_deref(),
+            Some("cat.png")
+        );
+        assert_eq!(url_name("https://example.com/"), None);
+        assert_eq!(url_name("https://example.com"), None);
     }
 
     #[tokio::test]

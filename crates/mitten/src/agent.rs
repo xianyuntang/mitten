@@ -55,6 +55,10 @@ pub trait Io {
     async fn board(&mut self, _text: &str) -> Result<()> {
         Ok(())
     }
+    /// Sends the user `bytes` as a file named `name`; only chat channels can.
+    async fn send_file(&mut self, _name: &str, _bytes: Vec<u8>) -> Result<()> {
+        bail!("files can only be sent in a chat channel")
+    }
 }
 
 type AnthropicModel = <anthropic::Client as CompletionClient>::CompletionModel;
@@ -227,11 +231,18 @@ async fn system_prompt(db: &Db, key: &str, config: &Config, user: Option<u64>) -
 /// Formatting guidance for where the conversation lives, keyed like `Agent::new`.
 /// Scheduled jobs (`cron:<id>`) post to Discord too.
 fn platform_hint(key: &str) -> &'static str {
-    if key.starts_with("discord:") || key.starts_with("cron:") {
-        "You are chatting over Discord. Markdown renders; tables do not, use bullets. Keep replies short."
+    if chats(key) {
+        "You are chatting over Discord. Markdown renders; tables do not, use bullets. Keep replies short. \
+         To show an image, put its direct URL on its own line, outside code blocks and <>, and Discord \
+         displays it; send_file attaches a local file or an image whose link won't display."
     } else {
         "You are in a plain terminal. Markdown does not render; write plain text."
     }
+}
+
+/// Whether the conversation `key` lives in Discord. Scheduled jobs (`cron:<id>`) post there too.
+fn chats(key: &str) -> bool {
+    key.starts_with("discord:") || key.starts_with("cron:")
 }
 
 /// End of the last complete tool round in the turn starting at `turn_start`, or `turn_start` if none.
@@ -760,6 +771,7 @@ impl Agent {
             .then(cron::tool)
             .into_iter()
             .chain(self.search.is_some().then(swarm::tool))
+            .chain(chats(&self.key).then(files::send_tool))
             .chain(self.mcp.tools().iter().cloned())
             .collect();
         loop {
@@ -817,6 +829,19 @@ impl Agent {
                         files::read(&self.config, args).await
                     }
                     "list_dir" => files::list(&self.config, &call.function.arguments).await,
+                    "send_file" if chats(&self.key) => {
+                        let sent = async {
+                            let (name, bytes) =
+                                files::load(&self.config, &self.fetcher, &call.function.arguments)
+                                    .await?;
+                            io.send_file(&name, bytes).await?;
+                            anyhow::Ok(name)
+                        };
+                        match sent.await {
+                            Ok(name) => format!("sent {name}"),
+                            Err(err) => format!("error: {err:#}"),
+                        }
+                    }
                     "view_pdf" => {
                         let args = &call.function.arguments;
                         if let Some(source) = args["path"].as_str().or(args["url"].as_str()) {
