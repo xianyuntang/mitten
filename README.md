@@ -69,9 +69,8 @@ How it behaves:
   `[discord.guilds.<server ID>]` with `allowed_users` (a list, or `"*"`) and `mention_only = true`.
   Other servers and DMs use the main list. In a server open to everyone, only the main list can
   approve actions, but anyone there can make the bot read files on this machine, so open a server
-  only if you trust everyone in it. A thread the bot is already
-  answering in needs no further mention until mitten restarts. To copy a server ID, right-click
-  the server with Developer Mode on.
+  only if you trust everyone in it. With `mention_only`, messages in the bot's threads need a
+  mention too. To copy a server ID, right-click the server with Developer Mode on.
 - A message in a server channel opens a thread, and each thread is its own conversation.
   Idle threads archive after an hour.
 - Each person has their own memory, shared by all of their threads and DMs; the terminal has one
@@ -116,7 +115,7 @@ Logs:
 | `web_search` | Searches through your SearXNG instance or the Brave Search API (pick one in `mitten configure`), optionally only recent results (`time_range`), news sites (`category`), or a date span (`after`, `before`; on SearXNG only Google engines honor it). Results show their publish date when known. | No |
 | `cast_crabs` | Cast of crabs mode (螃蟹群; a group of crabs is a cast, and mitten is a mitten crab), modeled on Kimi's Agent Swarm and used when the model judges a task big enough, or whenever a message starts with `/cast <request>`. The model acts as an orchestrator and dispatches up to 100 named crabs per call, each with its own role and task, 8 running at a time, while a live board shows what each one is doing. Crabs use only the read-only tools above and report back; the model sends more waves as needed and writes the answer. Needs web search configured. | No |
 | `memory` | Saves short notes about the person talking, loaded into their later conversations. | No |
-| `skill` | Loads, saves, or removes skills: saved instructions for recurring tasks, kept in the database and shared by everyone. Their names and descriptions are listed in every conversation; the model loads one when a task matches, and offers to save a finished multi-step task as a new one. | Save and remove |
+| `skill` | Loads, saves, or removes skills: saved instructions for recurring tasks, kept in the database, one set per person like memory. Their names and descriptions are listed in each of that person's conversations; the model loads one when a task matches, and offers to save a finished multi-step task as a new one. | Save and remove |
 | `cron` | Schedules a named prompt to run later, once (`at`) or on a cron expression, in the config's `timezone` (default: this machine's; restart `mitten serve` after changing it). Each run starts a fresh conversation and posts its reply in the Discord channel or thread where the job was made. Discord only; jobs run while `mitten serve` is up, and a run missed while it was down happens once on startup. Approval prompts during a run are denied unless approval is set to auto. A job's instructions are shown when it is made or changed; ask to change its instructions or timing, remove it, or give it a trial run now (posted where the job was made, schedule unchanged). | No |
 | `settings` | Reads or changes the model and a few limits. | Yes |
 | MCP tools | Any tool from the MCP servers you connect. | Yes, per server |

@@ -1061,10 +1061,7 @@ fn help(i: usize) -> (&'static str, &'static str) {
         }
         GUILD_ID => "With Developer Mode on, right-click the server › Copy Server ID.",
         GUILD_USERS => "Comma-separated user IDs, or * for everyone in the server.",
-        GUILD_REPLY => {
-            "Every message, or only messages that @mention the bot. Follow-ups in a thread it \
-             is already answering in need no mention."
-        }
+        GUILD_REPLY => "Every message, or only messages that @mention the bot, in threads too.",
         SEARCH => "Gives the model a web_search tool through SearXNG or the Brave Search API.",
         SEARCH_URL => "Your SearXNG instance, starting with http:// or https://.",
         SEARCH_USER | SEARCH_PASSWORD => {

@@ -230,13 +230,6 @@ impl Handler {
         }
     }
 
-    /// Whether `channel` already has a conversation running in this process.
-    fn is_open(&self, channel: ChannelId) -> bool {
-        self.channels
-            .lock()
-            .is_ok_and(|channels| channels.contains_key(&channel))
-    }
-
     async fn on_click(&self, ctx: &Context, click: &ComponentInteraction) -> Result<()> {
         let run = match click.data.custom_id.as_str() {
             RUN => true,
@@ -289,11 +282,7 @@ impl EventHandler for Handler {
         let Some(&bot) = self.bot.get() else {
             return;
         };
-        // ponytail: an open thread is known only until restart; then it takes a mention again.
-        if self.discord.mention_only(guild)
-            && !msg.mentions_user_id(bot)
-            && !self.is_open(msg.channel_id)
-        {
+        if self.discord.mention_only(guild) && !msg.mentions_user_id(bot) {
             return;
         }
         let content = strip_mention(&msg.content, bot);

@@ -359,7 +359,7 @@ impl DiscordSection {
 pub struct GuildRule {
     /// Who may talk to the bot in this server: user IDs, or `"*"` for everyone.
     pub allowed_users: Users,
-    /// Answer only messages that @mention the bot, except in a thread it is already answering in.
+    /// Answer only messages that @mention the bot, in its threads too.
     #[serde(default)]
     pub mention_only: bool,
 }

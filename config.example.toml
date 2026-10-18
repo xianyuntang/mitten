@@ -85,6 +85,5 @@ level = "warn"
 # # Or "*" for everyone in the server. Only the main allowed_users can approve actions there, but
 # # anyone can make the bot read files on this machine.
 # # allowed_users = "*"
-# # Answer only messages that @mention the bot (default false). Follow-ups in a thread it is
-# # already answering in need no mention until mitten restarts.
+# # Answer only messages that @mention the bot, in its threads too (default false).
 # mention_only = true
