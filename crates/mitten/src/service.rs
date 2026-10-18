@@ -206,7 +206,7 @@ const SYSTEMD_PATH: &[&str] = &[
     "/bin",
 ];
 
-/// The PATH the service runs with: the installing shell's PATH first, so node, npx, and claude
+/// The PATH the service runs with: the installing shell's PATH first, so node and npx
 /// resolve the same way as in the terminal (whatever manages them: asdf, nvm, Homebrew, …), then
 /// `fallback`. Relative entries are dropped, since the service's working directory differs.
 /// Like Hermes' gateway install, tools set up later need `mitten install` again.
@@ -241,7 +241,7 @@ Description=Mitten agent (Discord)
 [Service]
 ExecStart={exe} serve --config {config}
 WorkingDirectory=~
-# PATH from the shell that ran `mitten install`, so MCP servers (npx, uvx), claude, and the headless
+# PATH from the shell that ran `mitten install`, so MCP servers (npx, uvx) and the headless
 # Chrome lookup resolve as in the terminal. Run `mitten install` again after installing new tools.
 Environment="PATH={path}"
 Restart=always
@@ -291,7 +291,7 @@ fn render_plist(exe: &Path, config: &Path, home: &Path, log: &Path, path: &str) 
     <key>WorkingDirectory</key><string>{home}</string>
     <key>EnvironmentVariables</key>
     <dict>
-        <!-- PATH from the shell that ran `mitten install`, so MCP servers (npx, uvx), claude, and the
+        <!-- PATH from the shell that ran `mitten install`, so MCP servers (npx, uvx) and the
              headless Chrome lookup resolve as in the terminal. Reinstall after installing new tools. -->
         <key>PATH</key><string>{path}</string>
     </dict>

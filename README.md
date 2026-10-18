@@ -2,10 +2,10 @@
 
 A personal agent that runs on your machine. Chat with it in the terminal or over Discord. It
 reads files and web pages, searches the web, remembers what you tell it, calls tools on MCP
-servers such as Linear, and hands coding work to Claude Code.
+servers such as Linear, and runs scheduled jobs.
 
-Mitten's own tools only read. Anything that changes something (an MCP call, a Claude Code task,
-a settings change) asks you first, or goes past a reviewer model in auto mode.
+Mitten's own tools only read. Anything that changes something (an MCP call or a settings change)
+asks you first, or goes past a reviewer model in auto mode.
 
 ## Install
 
@@ -95,7 +95,7 @@ mitten uninstall
 ```
 
 The service runs `mitten serve` and restarts it if it exits. `mitten install` records your
-shell's `PATH`, so `npx`, `uvx`, and `claude` resolve the way they do in your terminal, whether
+shell's `PATH`, so `npx` and `uvx` resolve the way they do in your terminal, whether
 they come from Homebrew, asdf, nvm, or elsewhere. `mitten update` restarts it for you; run
 `mitten install` again after installing new tools.
 
@@ -120,7 +120,6 @@ Logs:
 | `cron` | Schedules a named prompt to run later, once (`at`) or on a cron expression, in the config's `timezone` (default: this machine's; restart `mitten serve` after changing it). Each run starts a fresh conversation and posts its reply in the Discord channel or thread where the job was made. Discord only; jobs run while `mitten serve` is up, and a run missed while it was down happens once on startup. Approval prompts during a run are denied unless approval is set to auto. A job's instructions are shown when it is made or changed; ask to change its instructions or timing, remove it, or give it a trial run now (posted where the job was made, schedule unchanged). | No |
 | `settings` | Reads or changes the model and a few limits. | Yes |
 | MCP tools | Any tool from the MCP servers you connect. | Yes, per server |
-| `claude_code` | Hands a coding task to Claude Code. | Yes |
 
 ### MCP servers
 
@@ -143,19 +142,6 @@ approve = true   # the default: ask before each call
 
 Servers connect once at startup and are shared by every conversation. Restart after changing
 them.
-
-### Claude Code
-
-With [Claude Code](https://claude.com/claude-code) installed and logged in, Mitten can delegate
-work that changes code or runs commands. It runs `claude -p` in a directory you allow, shows each
-step as it goes, and reports the result. A later task can resume the same Claude Code session.
-
-```toml
-[tools.claude_code]
-dirs = ["~/repos"]                   # it may only work in these directories
-permission_mode = "acceptEdits"      # or "plan" or "default"; bypassPermissions is refused
-allowed_tools = ["Bash(cargo test:*)", "Bash(git diff:*)"]
-```
 
 ## Approval
 
@@ -186,7 +172,7 @@ message; MCP servers, web search, and Discord need a restart.
 
 ```sh
 cargo test                    # unit tests
-cargo test -- --ignored       # also the tests that call real services (npx, your model, claude)
+cargo test -- --ignored       # also the tests that call real services (npx, your model)
 cargo clippy --all-targets -- -D warnings
 ```
 

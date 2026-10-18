@@ -34,14 +34,7 @@ const ENABLED: &str = "Enabled";
 const DISABLED: &str = "Disabled";
 const SEARXNG: &str = "SearXNG";
 const BRAVE: &str = "Brave Search API";
-const STEPS: [&str; 6] = [
-    "Model",
-    "Discord",
-    "Web search",
-    "MCP",
-    "Claude Code",
-    "Advanced",
-];
+const STEPS: [&str; 5] = ["Model", "Discord", "Web search", "MCP", "Advanced"];
 const NO: &str = "No";
 const YES: &str = "Yes";
 const EVERY_MESSAGE: &str = "Every message";
@@ -119,19 +112,15 @@ const MCP_TOKEN: usize = 19;
 const MCP_APPROVE: usize = 20;
 const APPROVAL: usize = 21;
 const REVIEWER: usize = 22;
-const CLAUDE: usize = 23;
-const CLAUDE_DIRS: usize = 24;
-const CLAUDE_MODE: usize = 25;
-const CLAUDE_TOOLS: usize = 26;
-const TIMEZONE: usize = 27;
-const BRAVE_KEY: usize = 28;
-const GUILD_ADD: usize = 29;
-const GUILD_ID: usize = 30;
-const GUILD_USERS: usize = 31;
-const GUILD_REPLY: usize = 32;
+const TIMEZONE: usize = 23;
+const BRAVE_KEY: usize = 24;
+const GUILD_ADD: usize = 25;
+const GUILD_ID: usize = 26;
+const GUILD_USERS: usize = 27;
+const GUILD_REPLY: usize = 28;
 /// First of the rows for already configured MCP servers, followed by the configured Discord
 /// servers' rows.
-const MCP_FIRST: usize = 33;
+const MCP_FIRST: usize = 29;
 
 /// Focus value for the Save button under the fields.
 const BUTTON: usize = usize::MAX;
@@ -149,8 +138,6 @@ struct Form {
     /// `tools.searxng.results` or `tools.brave.results`, not on the form; kept so saving doesn't
     /// reset a hand-edited value.
     search_results: usize,
-    /// `tools.claude_code` timeout and command, not on the form; kept like `search_results`.
-    claude_extra: (u64, String),
     /// Configured MCP servers, one Keep / Remove row each from `MCP_FIRST` on.
     mcp_names: Vec<String>,
     /// Configured Discord servers, one Keep / Remove row each after the MCP rows.
@@ -287,13 +274,13 @@ impl Form {
                     .unwrap_or_default(),
             ),
             field(
-                5,
+                4,
                 "Log level",
                 Kind::Select(options_with(&["error", "warn", "info", "debug"], log)),
                 log.to_owned(),
             ),
             field(
-                5,
+                4,
                 "Database",
                 Kind::Text,
                 database.to_string_lossy().into_owned(),
@@ -319,7 +306,7 @@ impl Form {
         ];
         let auto = current.is_some_and(|c| matches!(c.approval, config::Approval::Auto { .. }));
         fields.push(field(
-            5,
+            4,
             "Approval",
             Kind::Select(options(&[ASK_ME, AUTO])),
             if auto { AUTO } else { ASK_ME }.to_owned(),
@@ -331,48 +318,13 @@ impl Form {
         let mut reviewers = vec![SAME_MODEL];
         reviewers.extend(MODELS);
         fields.push(field(
-            5,
+            4,
             "Reviewer model",
             Kind::Select(options_with(&reviewers, reviewer)),
             reviewer.to_owned(),
         ));
-        let claude = current.and_then(|c| c.claude_code.as_ref());
-        fields.push(field(
-            4,
-            "Claude Code",
-            Kind::Select(options(&[DISABLED, ENABLED])),
-            if claude.is_some() { ENABLED } else { DISABLED }.to_owned(),
-        ));
-        fields.push(field(
-            4,
-            "Directories",
-            Kind::Text,
-            claude.map_or_else(
-                || "~/repos".to_owned(),
-                |c| {
-                    c.dirs
-                        .iter()
-                        .map(|d| d.display().to_string())
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                },
-            ),
-        ));
-        let mode = claude.map_or(config::CLAUDE_CODE_MODES[0], |c| c.permission_mode.as_str());
-        fields.push(field(
-            4,
-            "Permissions",
-            Kind::Select(options(config::CLAUDE_CODE_MODES)),
-            mode.to_owned(),
-        ));
-        fields.push(field(
-            4,
-            "Allowed tools",
-            Kind::Text,
-            claude.map_or_else(String::new, |c| c.allowed_tools.join(", ")),
-        ));
         let zone = current.map_or_else(config::system_timezone, |c| c.timezone);
-        fields.push(field(5, "Time zone", Kind::Text, zone.name().to_owned()));
+        fields.push(field(4, "Time zone", Kind::Text, zone.name().to_owned()));
         fields.push(field(
             2,
             "Brave API key",
@@ -439,11 +391,6 @@ impl Form {
             status: Line::default(),
             force_save: false,
             search_results: search.map_or(5, config::Search::results),
-            claude_extra: current
-                .and_then(|c| c.claude_code.as_ref())
-                .map_or((1800, "claude".to_owned()), |c| {
-                    (c.timeout.as_secs(), c.command.clone())
-                }),
             mcp_names,
             guilds,
             attempted: false,
@@ -472,7 +419,6 @@ impl Form {
                 MCP_COMMAND | MCP_ARGS | MCP_ENV => self.fields[MCP_ADD].value == STDIO,
                 MCP_URL | MCP_TOKEN => self.fields[MCP_ADD].value == HTTP,
                 REVIEWER => self.fields[APPROVAL].value == AUTO,
-                CLAUDE_DIRS | CLAUDE_MODE | CLAUDE_TOOLS => self.fields[CLAUDE].value == ENABLED,
                 _ => true,
             }
     }
@@ -689,9 +635,6 @@ impl Form {
             3 => {
                 self.mcp()?;
             }
-            4 => {
-                self.claude_code()?;
-            }
             _ => {
                 self.required(DATABASE)?;
                 self.timezone()?;
@@ -791,32 +734,6 @@ impl Form {
         }))
     }
 
-    fn claude_code(&self) -> std::result::Result<Option<ClaudeAnswers>, String> {
-        if self.fields[CLAUDE].value != ENABLED {
-            return Ok(None);
-        }
-        let list = |i| -> Vec<String> {
-            self.value(i)
-                .split(',')
-                .map(str::trim)
-                .filter(|part| !part.is_empty())
-                .map(str::to_owned)
-                .collect()
-        };
-        let dirs = list(CLAUDE_DIRS);
-        if dirs.is_empty() {
-            return Err("list at least one directory Claude Code may work in".to_owned());
-        }
-        let (timeout_secs, command) = self.claude_extra.clone();
-        Ok(Some(ClaudeAnswers {
-            dirs,
-            permission_mode: self.value(CLAUDE_MODE),
-            allowed_tools: list(CLAUDE_TOOLS),
-            timeout_secs,
-            command,
-        }))
-    }
-
     /// MCP servers to remove, and the one to add as `(name, table)`.
     fn mcp(&self) -> std::result::Result<McpChanges, String> {
         let remove: Vec<String> = self
@@ -883,7 +800,6 @@ impl Form {
             model: self.model()?,
             discord: self.discord()?,
             search: self.search()?,
-            claude_code: self.claude_code()?,
             log_level: self.required(LOG)?,
             auto_approval: (self.fields[APPROVAL].value == AUTO).then(|| {
                 let reviewer = self.value(REVIEWER);
@@ -1169,16 +1085,10 @@ fn help(i: usize) -> (&'static str, &'static str) {
         MCP_TOKEN => "Bearer token for the server, if it needs one.",
         MCP_APPROVE => "Ask before each of this server's tool calls, or let them run.",
         APPROVAL => {
-            "Who approves actions like settings changes and Claude Code runs: you every time, or \
+            "Who approves actions like settings changes and MCP calls: you every time, or \
              a reviewer model that passes low-risk ones and asks you about the rest."
         }
         REVIEWER => "The model that reviews actions when approval is Auto.",
-        CLAUDE => "Lets the model hand coding work to Claude Code.",
-        CLAUDE_DIRS => "Comma-separated directories Claude Code may work in.",
-        CLAUDE_MODE => "Claude Code's permission mode for the runs Mitten starts.",
-        CLAUDE_TOOLS => {
-            "Comma-separated tools Claude Code may use without asking, like Bash(cargo test:*)."
-        }
         TIMEZONE => "IANA name like Asia/Taipei, for message times and scheduled jobs.",
         0 => "Where Mitten's model runs. Only OpenCode Go for now.",
         _ => "Keep it, or Remove it.",
@@ -1272,20 +1182,11 @@ enum SearchAnswers {
     },
 }
 
-struct ClaudeAnswers {
-    dirs: Vec<String>,
-    permission_mode: String,
-    allowed_tools: Vec<String>,
-    timeout_secs: u64,
-    command: String,
-}
-
 struct Answers {
     model: String,
     api_key: String,
     discord: Option<DiscordAnswers>,
     search: Option<SearchAnswers>,
-    claude_code: Option<ClaudeAnswers>,
     log_level: String,
     /// `Some` for auto approval, holding the reviewer model if it isn't the main one.
     auto_approval: Option<Option<String>>,
@@ -1363,20 +1264,6 @@ fn render_toml(answers: &Answers) -> String {
         if let Some(model) = reviewer {
             text.push_str(&format!("model = {}\n", quote(model)));
         }
-    }
-    if let Some(claude) = &answers.claude_code {
-        let array = |items: &[String]| {
-            toml::Value::Array(items.iter().cloned().map(toml::Value::String).collect()).to_string()
-        };
-        text.push_str(&format!(
-            "\n[tools.claude_code]\ndirs = {}\npermission_mode = {}\nallowed_tools = {}\n\
-             timeout_secs = {}\ncommand = {}\n",
-            array(&claude.dirs),
-            quote(&claude.permission_mode),
-            array(&claude.allowed_tools),
-            claude.timeout_secs,
-            quote(&claude.command),
-        ));
     }
     match &answers.search {
         Some(SearchAnswers::Searxng { url, auth, results }) => {
@@ -1505,13 +1392,6 @@ mod tests {
                     },
                 ],
             }),
-            claude_code: Some(ClaudeAnswers {
-                dirs: vec!["~/repos".to_owned(), "/srv/app".to_owned()],
-                permission_mode: "plan".to_owned(),
-                allowed_tools: vec!["Bash(cargo test:*)".to_owned()],
-                timeout_secs: 600,
-                command: "claude".to_owned(),
-            }),
             search: Some(SearchAnswers::Searxng {
                 url: "https://search.example.com".to_owned(),
                 auth: Some(("me".to_owned(), "p\"w".to_owned())),
@@ -1525,14 +1405,6 @@ mod tests {
         let config = Config::parse(&text).expect("valid");
         assert_eq!(config.timezone, chrono_tz::Tz::Asia__Taipei);
         assert_eq!(config.model, "qwen3.8-max");
-        let claude = config.claude_code.clone().expect("claude code");
-        assert_eq!(
-            claude.dirs,
-            [PathBuf::from("~/repos"), PathBuf::from("/srv/app")]
-        );
-        assert_eq!(claude.permission_mode, "plan");
-        assert_eq!(claude.allowed_tools, ["Bash(cargo test:*)"]);
-        assert_eq!(claude.timeout.as_secs(), 600);
         assert_eq!(
             config.approval,
             config::Approval::Auto {
@@ -1589,7 +1461,6 @@ mod tests {
             api_key: "k".to_owned(),
             discord: None,
             search: Some(answers),
-            claude_code: None,
             log_level: "warn".to_owned(),
             auto_approval: None,
             database: PathBuf::from("/tmp/m.db"),
@@ -1669,7 +1540,7 @@ mod tests {
         form.fields[SEARCH_PASSWORD].value = "pw".to_owned();
         form.check_step(form.step).expect("search step valid");
 
-        form.step = 5;
+        form.step = 4;
         form.fields[TIMEZONE].value = "Taipei".to_owned();
         assert!(form.check_step(form.step).is_err(), "not an IANA name");
         form.fields[TIMEZONE].value = "Asia/Taipei".to_owned();

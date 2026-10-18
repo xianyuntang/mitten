@@ -16,7 +16,6 @@ use rig_core::message::{
 use rig_core::providers::{anthropic, openai};
 use serde_json::Value;
 
-use crate::claude_code;
 use crate::compact;
 use crate::config::{Api, Config};
 use crate::cron;
@@ -203,20 +202,17 @@ When the obvious interpretation is clear, act; ask only when the ambiguity chang
 /// Most stable text first and memory last, so the provider can cache the prefix: a memory edit
 /// only changes the tail. Rebuilt before every turn, so memory saved in any conversation shows up
 /// on the next message everywhere; the text only changes when memory or settings do.
-/// Web search and Claude Code guidance are added when those tools are configured.
+/// Web search guidance is added when that tool is configured.
 /// `user` picks whose memory loads: a Discord user ID, or `None` for the terminal.
 async fn system_prompt(db: &Db, key: &str, config: &Config, user: Option<u64>) -> Result<String> {
     let cwd = std::env::current_dir().context("failed to read current directory")?;
     let memories = db.memories(user).await.context("failed to load memory")?;
     let skills = db.skills().await.context("failed to load skills")?;
-    let mut tools = if config.search.is_some() {
+    let tools = if config.search.is_some() {
         format!("{}\n\n{}\n\n", search::GUIDANCE, swarm::GUIDANCE)
     } else {
         String::new()
     };
-    if let Some(claude_code) = &config.claude_code {
-        tools.push_str(&format!("{}\n\n", claude_code::guidance(claude_code)));
-    }
     Ok(format!(
         "{IDENTITY}\n\n{tools}{guidance}\n\n{skills}\n\nOS: {os}. Working directory: {cwd}.\n\n{hint}\n\n{saved}",
         guidance = memory::GUIDANCE,
@@ -314,7 +310,6 @@ pub(crate) fn request(
         ]
         .into_iter()
         .chain(config.search.is_some().then(search::tool))
-        .chain(config.claude_code.as_ref().map(claude_code::tool))
         .chain(extra.iter().cloned())
         .collect(),
         temperature: None,
@@ -815,12 +810,6 @@ impl Agent {
             let mut images = Vec::new();
             for call in &calls {
                 let output = match call.function.name.as_str() {
-                    "claude_code" => match &self.config.claude_code {
-                        Some(config) => {
-                            claude_code::run(config, &call.function.arguments, io).await?
-                        }
-                        None => "error: claude_code is not configured".to_owned(),
-                    },
                     "read_file" => {
                         let args = &call.function.arguments;
                         if let Some(path) = args["path"].as_str() {
