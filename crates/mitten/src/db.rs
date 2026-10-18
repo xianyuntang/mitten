@@ -22,6 +22,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/0008_job_names.sql"),
     include_str!("../migrations/0009_memories_per_user.sql"),
     include_str!("../migrations/0010_skills.sql"),
+    include_str!("../migrations/0011_skills_per_user.sql"),
 ];
 
 /// Row of `conversations`.
@@ -292,36 +293,38 @@ impl Db {
         .await
     }
 
-    /// Every skill, by name.
-    pub async fn skills(&self) -> Result<Vec<Skill>> {
+    /// `user`'s skills by name: a Discord user ID, or `None` for the terminal.
+    pub async fn skills(&self, user: Option<u64>) -> Result<Vec<Skill>> {
         self.with_conn(move |conn| {
-            let mut stmt =
-                conn.prepare("SELECT name, description, content FROM skills ORDER BY name")?;
-            let rows = stmt.query_map([], Skill::from_row)?;
+            let mut stmt = conn.prepare(
+                "SELECT name, description, content FROM skills WHERE user_id IS ?1 ORDER BY name",
+            )?;
+            let rows = stmt.query_map(params![sql_user(user)], Skill::from_row)?;
             Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
         })
         .await
     }
 
-    /// Creates `skill`, or replaces the one with its name.
-    pub async fn save_skill(&self, skill: Skill) -> Result<()> {
+    /// Creates `skill` for `user`, or replaces their one with its name.
+    pub async fn save_skill(&self, user: Option<u64>, skill: Skill) -> Result<()> {
         self.with_conn(move |conn| {
             conn.execute(
-                "INSERT INTO skills (name, description, content) VALUES (?1, ?2, ?3)
-                 ON CONFLICT (name) DO UPDATE SET description = excluded.description,
+                "INSERT INTO skills (user_id, name, description, content) VALUES (?1, ?2, ?3, ?4)
+                 ON CONFLICT (ifnull(user_id, 0), name) DO UPDATE SET description = excluded.description,
                      content = excluded.content,
                      updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')",
-                params![skill.name, skill.description, skill.content],
+                params![sql_user(user), skill.name, skill.description, skill.content],
             )?;
             Ok(())
         })
         .await
     }
 
-    /// Deletes the skill named `name`; false if there was none.
-    pub async fn remove_skill(&self, name: String) -> Result<bool> {
+    /// Deletes `user`'s skill named `name`; false if they had none.
+    pub async fn remove_skill(&self, user: Option<u64>, name: String) -> Result<bool> {
         self.with_conn(move |conn| {
-            Ok(conn.execute("DELETE FROM skills WHERE name = ?1", params![name])? > 0)
+            let sql = "DELETE FROM skills WHERE name = ?1 AND user_id IS ?2";
+            Ok(conn.execute(sql, params![name, sql_user(user)])? > 0)
         })
         .await
     }
@@ -508,21 +511,43 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn skills_round_trip() {
+    async fn skills_round_trip_per_user() {
         let db = Db::open_in_memory().expect("open");
         let skill = |name: &str, content: &str| Skill {
             name: name.to_owned(),
             description: "d".to_owned(),
             content: content.to_owned(),
         };
-        db.save_skill(skill("b", "one")).await.expect("save");
-        db.save_skill(skill("a", "x")).await.expect("save");
-        db.save_skill(skill("b", "two")).await.expect("replace");
-        let skills = db.skills().await.expect("load");
+        db.save_skill(None, skill("b", "one")).await.expect("save");
+        db.save_skill(None, skill("a", "x")).await.expect("save");
+        db.save_skill(None, skill("b", "two"))
+            .await
+            .expect("replace");
+        db.save_skill(Some(7), skill("b", "mine"))
+            .await
+            .expect("save");
+        db.save_skill(Some(7), skill("b", "mine2"))
+            .await
+            .expect("replace");
+        let skills = db.skills(None).await.expect("load");
         assert_eq!(skills, [skill("a", "x"), skill("b", "two")]);
-        assert!(db.remove_skill("a".to_owned()).await.expect("remove"));
-        assert!(!db.remove_skill("a".to_owned()).await.expect("remove again"));
-        assert_eq!(db.skills().await.expect("load").len(), 1);
+        assert_eq!(
+            db.skills(Some(7)).await.expect("load"),
+            [skill("b", "mine2")]
+        );
+        assert!(
+            !db.remove_skill(Some(7), "a".to_owned())
+                .await
+                .expect("not theirs")
+        );
+        assert!(db.remove_skill(None, "a".to_owned()).await.expect("remove"));
+        assert!(
+            !db.remove_skill(None, "a".to_owned())
+                .await
+                .expect("remove again")
+        );
+        assert_eq!(db.skills(None).await.expect("load").len(), 1);
+        assert_eq!(db.skills(Some(7)).await.expect("load").len(), 1);
     }
 
     #[tokio::test]

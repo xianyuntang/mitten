@@ -203,11 +203,11 @@ When the obvious interpretation is clear, act; ask only when the ambiguity chang
 /// only changes the tail. Rebuilt before every turn, so memory saved in any conversation shows up
 /// on the next message everywhere; the text only changes when memory or settings do.
 /// Web search guidance is added when that tool is configured.
-/// `user` picks whose memory loads: a Discord user ID, or `None` for the terminal.
+/// `user` picks whose memory and skills load: a Discord user ID, or `None` for the terminal.
 async fn system_prompt(db: &Db, key: &str, config: &Config, user: Option<u64>) -> Result<String> {
     let cwd = std::env::current_dir().context("failed to read current directory")?;
     let memories = db.memories(user).await.context("failed to load memory")?;
-    let skills = db.skills().await.context("failed to load skills")?;
+    let skills = db.skills(user).await.context("failed to load skills")?;
     let tools = if config.search.is_some() {
         format!("{}\n\n{}\n\n", search::GUIDANCE, swarm::GUIDANCE)
     } else {
@@ -398,7 +398,7 @@ impl Agent {
             Ok(name) => name,
             Err(problem) => return Ok(format!("error: {problem}")),
         };
-        let skills = self.db.skills().await?;
+        let skills = self.db.skills(self.user).await?;
         let existing = skills.iter().find(|s| s.name == name);
         match args["action"].as_str() {
             Some("load") => {
@@ -424,7 +424,7 @@ impl Agent {
                 {
                     return Ok("error: the user denied saving this skill".to_owned());
                 }
-                self.db.save_skill(new).await?;
+                self.db.save_skill(self.user, new).await?;
                 io.ran("saved", true).await?;
                 Ok(format!(
                     "saved skill {name}; it is listed from the next message"
@@ -437,7 +437,7 @@ impl Agent {
                 if !io.confirm(&format!("remove skill `{name}`")).await? {
                     return Ok("error: the user denied removing this skill".to_owned());
                 }
-                self.db.remove_skill(name.clone()).await?;
+                self.db.remove_skill(self.user, name.clone()).await?;
                 io.ran("removed", true).await?;
                 Ok(format!("removed skill {name}"))
             }

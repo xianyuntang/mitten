@@ -1,5 +1,5 @@
-//! Skills: reusable how-to instructions for recurring tasks, kept in the database and shared by
-//! everyone. The system prompt lists their names and descriptions; the `skill` tool loads one's
+//! Skills: reusable how-to instructions for recurring tasks, kept in the database, one set per
+//! person like memory. The system prompt lists their names and descriptions; the `skill` tool loads one's
 //! content when a task matches, and saves or removes skills after the user approves.
 
 use rig_core::completion::ToolDefinition;
