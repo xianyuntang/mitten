@@ -411,7 +411,10 @@ impl Form {
             };
             let keep = format!(
                 "{KEEP} · {} · {}",
-                join_ids(&rule.allowed_users),
+                match &rule.allowed_users {
+                    config::Users::Everyone => "everyone".to_owned(),
+                    config::Users::Only(ids) => join_ids(ids),
+                },
                 reply.to_lowercase()
             );
             field(
@@ -725,7 +728,10 @@ impl Form {
         guilds.push(GuildAnswers {
             id,
             mention_only: self.fields[GUILD_REPLY].value == MENTIONED,
-            allowed_users: parse_user_ids(&self.value(GUILD_USERS))?,
+            allowed_users: match self.value(GUILD_USERS).as_str() {
+                "*" => config::Users::Everyone,
+                ids => config::Users::Only(parse_user_ids(ids)?),
+            },
         });
         Ok(guilds)
     }
@@ -926,6 +932,8 @@ impl Form {
                 Span::styled(format!("{:<20} ", field.label), label_style),
                 Span::raw(shown),
                 Span::raw(cursor),
+                Span::raw("  "),
+                hint(i).dark_gray(),
             ]));
         }
         let title = format!(" mitten configure · {} ", STEPS[self.step]);
@@ -957,6 +965,16 @@ impl Form {
     }
 }
 
+/// Gray help shown after field `i`'s value.
+fn hint(i: usize) -> &'static str {
+    match i {
+        USERS => "comma-separated; used in DMs and servers not added below",
+        GUILD_ID => "right-click the server › Copy Server ID",
+        GUILD_USERS => "comma-separated, or * for everyone in the server",
+        _ => "",
+    }
+}
+
 /// Places the dropdown just under field row `row`, aligned with the value column.
 fn dropdown_area(body: Rect, row: u16, items: u16) -> Rect {
     let x = body.x + 1 + 2 + 21;
@@ -982,7 +1000,7 @@ struct DiscordAnswers {
 struct GuildAnswers {
     id: u64,
     mention_only: bool,
-    allowed_users: Vec<u64>,
+    allowed_users: config::Users,
 }
 
 fn join_ids(ids: &[u64]) -> String {
@@ -1164,9 +1182,12 @@ fn render_toml(answers: &Answers) -> String {
         ));
         for guild in &discord.guilds {
             text.push_str(&format!(
-                "\n[discord.guilds.{}]\nallowed_users = [{}]\n",
+                "\n[discord.guilds.{}]\nallowed_users = {}\n",
                 guild.id,
-                join_ids(&guild.allowed_users)
+                match &guild.allowed_users {
+                    config::Users::Everyone => quote("*"),
+                    config::Users::Only(ids) => format!("[{}]", join_ids(ids)),
+                }
             ));
             if guild.mention_only {
                 text.push_str("mention_only = true\n");
@@ -1251,12 +1272,12 @@ mod tests {
                     GuildAnswers {
                         id: 100,
                         mention_only: true,
-                        allowed_users: vec![2, 3],
+                        allowed_users: config::Users::Only(vec![2, 3]),
                     },
                     GuildAnswers {
                         id: 200,
                         mention_only: false,
-                        allowed_users: vec![1],
+                        allowed_users: config::Users::Everyone,
                     },
                 ],
             }),
@@ -1297,8 +1318,8 @@ mod tests {
         assert_eq!(config.api_key.as_str(), "sk-\"quoted\"");
         let discord = config.discord.as_ref().expect("discord");
         assert_eq!(discord.allowed_users, [1, 22]);
-        assert_eq!(discord.rule(Some(100)), (&[2, 3][..], true));
-        assert_eq!(discord.rule(Some(200)), (&[1][..], false));
+        assert!(discord.mention_only(Some(100)) && discord.can_talk(Some(100), 2));
+        assert_eq!(discord.guilds[&200].allowed_users, config::Users::Everyone);
         let mut reopened = Form::new(Some(&config)).expect("form");
         let first = reopened.guild_first();
         assert_eq!(reopened.fields[first].label, "100");
@@ -1306,13 +1327,17 @@ mod tests {
             reopened.fields[first].value,
             "Keep · 2, 3 · only when @mentioned"
         );
+        assert_eq!(
+            reopened.fields[first + 1].value,
+            "Keep · everyone · every message"
+        );
         reopened.fields[first + 1].value = REMOVE.to_owned();
         let kept = reopened.guild_answers().expect("valid");
         assert_eq!(
             kept.iter()
                 .map(|g| (g.id, g.mention_only, g.allowed_users.clone()))
                 .collect::<Vec<_>>(),
-            [(100, true, vec![2, 3])]
+            [(100, true, config::Users::Only(vec![2, 3]))]
         );
         let Some(config::Search::Searxng(searxng)) = config.search else {
             panic!("search section");
@@ -1392,7 +1417,7 @@ mod tests {
         form.fields[GUILD_ID].value = "100".to_owned();
         form.fields[GUILD_USERS].value = String::new();
         assert!(form.check_step(form.step).is_err(), "server needs users");
-        form.fields[GUILD_USERS].value = "12".to_owned();
+        form.fields[GUILD_USERS].value = "*".to_owned();
         form.fields[GUILD_REPLY].value = MENTIONED.to_owned();
         form.check_step(form.step).expect("discord step valid");
 
@@ -1426,9 +1451,9 @@ mod tests {
             discord
                 .guilds
                 .iter()
-                .map(|g| (g.id, g.mention_only))
+                .map(|g| (g.id, g.mention_only, g.allowed_users.clone()))
                 .collect::<Vec<_>>(),
-            [(100, true)]
+            [(100, true, config::Users::Everyone)]
         );
     }
 

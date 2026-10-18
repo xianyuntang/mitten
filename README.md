@@ -64,9 +64,12 @@ How it behaves:
 
 - Only the user IDs you list are heard; everyone else is ignored.
 - Each server can have its own list instead, set under **Add server** on the Discord page of
-  `mitten configure`: the server ID, its user IDs, and whether it replies to every message or
-  only when @mentioned. In config, that is `[discord.guilds.<server ID>]` with `allowed_users`
-  and `mention_only = true`. Other servers and DMs use the main list. A thread the bot is already
+  `mitten configure`: the server ID, its user IDs (or `*` for everyone there), and whether it
+  replies to every message or only when @mentioned. In config, that is
+  `[discord.guilds.<server ID>]` with `allowed_users` (a list, or `"*"`) and `mention_only = true`.
+  Other servers and DMs use the main list. In a server open to everyone, only the main list can
+  approve actions, but anyone there can make the bot read files on this machine, so open a server
+  only if you trust everyone in it. A thread the bot is already
   answering in needs no further mention until mitten restarts. To copy a server ID, right-click
   the server with Developer Mode on.
 - A message in a server channel opens a thread, and each thread is its own conversation.

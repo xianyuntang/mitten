@@ -65,6 +65,8 @@ enum Input {
         message: MessageId,
         /// Discord user who sent it; their memory is the one the turn uses.
         author: u64,
+        /// Whether a typed `y` from them approves a waiting action.
+        can_approve: bool,
     },
     /// A Run or Deny click on the approval message `message`.
     Decision { message: MessageId, run: bool },
@@ -241,8 +243,10 @@ impl Handler {
             DENY => false,
             _ => return Ok(()),
         };
-        let (users, _) = self.discord.rule(click.guild_id.map(|g| g.get()));
-        if !users.contains(&click.user.id.get()) {
+        if !self
+            .discord
+            .can_approve(click.guild_id.map(|g| g.get()), click.user.id.get())
+        {
             let reply = CreateInteractionResponseMessage::new()
                 .content("You are not allowed to approve changes.")
                 .ephemeral(true);
@@ -277,15 +281,19 @@ impl Handler {
 #[async_trait]
 impl EventHandler for Handler {
     async fn message(&self, ctx: Context, msg: Message) {
-        let (users, mention) = self.discord.rule(msg.guild_id.map(|g| g.get()));
-        if msg.author.bot || !users.contains(&msg.author.id.get()) {
+        let guild = msg.guild_id.map(|g| g.get());
+        let author = msg.author.id.get();
+        if msg.author.bot || !self.discord.can_talk(guild, author) {
             return;
         }
         let Some(&bot) = self.bot.get() else {
             return;
         };
         // ponytail: an open thread is known only until restart; then it takes a mention again.
-        if mention && !msg.mentions_user_id(bot) && !self.is_open(msg.channel_id) {
+        if self.discord.mention_only(guild)
+            && !msg.mentions_user_id(bot)
+            && !self.is_open(msg.channel_id)
+        {
             return;
         }
         let content = strip_mention(&msg.content, bot);
@@ -310,7 +318,8 @@ impl EventHandler for Handler {
             attachments,
             origin: msg.channel_id,
             message: msg.id,
-            author: msg.author.id.get(),
+            author,
+            can_approve: self.discord.can_approve(guild, author),
         };
         self.deliver(&ctx.http, channel, input);
     }
@@ -447,6 +456,7 @@ async fn run_channel(
             origin,
             message,
             author,
+            ..
         } = input
         else {
             continue; // A click on an approval that already timed out.
@@ -523,6 +533,7 @@ async fn merge_waiting(
             origin,
             message,
             author: sender,
+            can_approve,
         } = input
         else {
             continue;
@@ -535,6 +546,7 @@ async fn merge_waiting(
                 origin,
                 message,
                 author: sender,
+                can_approve,
             });
         }
         content.push('\n');
@@ -689,6 +701,13 @@ impl Io for DiscordIo {
                 // The click handler already updated the message.
                 Ok(Some(Input::Decision { message: id, run })) if id == message => break run,
                 Ok(Some(Input::Decision { .. })) => {}
+                // Someone who may not approve can't answer either; their message is dropped.
+                Ok(Some(Input::Text {
+                    origin,
+                    message: reply,
+                    can_approve: false,
+                    ..
+                })) => self.finish(origin, reply, false).await,
                 // Typing an answer still works; anything but `y` is a no.
                 Ok(Some(Input::Text {
                     content,
@@ -875,6 +894,7 @@ mod tests {
             origin: ChannelId::new(1),
             message: MessageId::new(id),
             author: 7,
+            can_approve: true,
         };
         let (tx, mut rx) = mpsc::unbounded_channel();
         for input in [
@@ -910,6 +930,7 @@ mod tests {
                 origin: ChannelId::new(1),
                 message: MessageId::new(id),
                 author,
+                can_approve: true,
             };
             tx.send(input).unwrap();
         }
@@ -932,6 +953,7 @@ mod tests {
                     origin: ChannelId::new(1),
                     message: MessageId::new(id),
                     author: 7,
+                    can_approve: true,
                 };
                 if tx.send(input).is_err() {
                     break;
