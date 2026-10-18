@@ -1,9 +1,10 @@
 //! Discord gateway: one agent per DM or thread. A message in a server text channel opens a new
 //! thread for its conversation. Memory is shared by every conversation. Only allow-listed
-//! users are heard, and they approve settings changes with buttons.
+//! users are heard, per server if `[discord.guilds]` says so, and they approve settings changes
+//! with buttons.
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use anyhow::{Context as _, Result, bail};
@@ -13,13 +14,13 @@ use serenity::all::{
     ComponentInteraction, Context, CreateActionRow, CreateAllowedMentions, CreateAttachment,
     CreateButton, CreateInteractionResponse, CreateInteractionResponseMessage, CreateMessage,
     CreateThread, EditMessage, EditThread, EventHandler, GatewayIntents, Http, Interaction,
-    Message, MessageId, Ready,
+    Message, MessageId, Ready, UserId,
 };
 use serenity::async_trait;
 use tokio::sync::mpsc;
 
 use crate::agent::{self, Agent, Io};
-use crate::config::Config;
+use crate::config::{Config, DiscordSection};
 use crate::cron;
 use crate::db::{Db, Job};
 use crate::document;
@@ -80,14 +81,16 @@ pub async fn serve(config: Config) -> Result<()> {
         | GatewayIntents::GUILD_MESSAGES
         | GatewayIntents::MESSAGE_CONTENT;
     let mcp = Arc::new(Mcp::connect(&config.mcp).await);
+    let token = discord.token.as_str().to_owned();
     let handler = Handler {
         mcp: Arc::clone(&mcp),
         config: config.clone(),
         db: db.clone(),
-        allowed_users: discord.allowed_users,
+        discord,
+        bot: OnceLock::new(),
         channels: Mutex::new(HashMap::new()),
     };
-    let mut client = Client::builder(discord.token.as_str(), intents)
+    let mut client = Client::builder(&token, intents)
         .event_handler(handler)
         .await
         .context("failed to build Discord client")?;
@@ -189,8 +192,10 @@ struct Handler {
     mcp: Arc<Mcp>,
     config: Config,
     db: Db,
-    /// The only people whose messages and clicks the bot acts on, in DMs and in every server channel.
-    allowed_users: Vec<u64>,
+    /// Who the bot acts on, in DMs and in each server.
+    discord: DiscordSection,
+    /// The bot's own user, known once connected.
+    bot: OnceLock<UserId>,
     /// Inbox of the task that owns each channel's conversation.
     channels: Mutex<HashMap<ChannelId, mpsc::UnboundedSender<Input>>>,
 }
@@ -223,13 +228,21 @@ impl Handler {
         }
     }
 
+    /// Whether `channel` already has a conversation running in this process.
+    fn is_open(&self, channel: ChannelId) -> bool {
+        self.channels
+            .lock()
+            .is_ok_and(|channels| channels.contains_key(&channel))
+    }
+
     async fn on_click(&self, ctx: &Context, click: &ComponentInteraction) -> Result<()> {
         let run = match click.data.custom_id.as_str() {
             RUN => true,
             DENY => false,
             _ => return Ok(()),
         };
-        if !self.allowed_users.contains(&click.user.id.get()) {
+        let (users, _) = self.discord.rule(click.guild_id.map(|g| g.get()));
+        if !users.contains(&click.user.id.get()) {
             let reply = CreateInteractionResponseMessage::new()
                 .content("You are not allowed to approve changes.")
                 .ephemeral(true);
@@ -264,15 +277,23 @@ impl Handler {
 #[async_trait]
 impl EventHandler for Handler {
     async fn message(&self, ctx: Context, msg: Message) {
-        // No mention needed: every message from an allowed user goes to that channel's agent.
-        if msg.author.bot || !self.allowed_users.contains(&msg.author.id.get()) {
+        let (users, mention) = self.discord.rule(msg.guild_id.map(|g| g.get()));
+        if msg.author.bot || !users.contains(&msg.author.id.get()) {
             return;
         }
+        let Some(&bot) = self.bot.get() else {
+            return;
+        };
+        // ponytail: an open thread is known only until restart; then it takes a mention again.
+        if mention && !msg.mentions_user_id(bot) && !self.is_open(msg.channel_id) {
+            return;
+        }
+        let content = strip_mention(&msg.content, bot);
         // Acknowledge right away so the user knows the bot has it before the model answers.
         if let Err(err) = msg.react(&ctx.http, RECEIVED).await {
             tracing::warn!("failed to react to message: {err:#}");
         }
-        let channel = match route(&ctx, &msg, &self.config).await {
+        let channel = match route(&ctx, &msg, &content, &self.config).await {
             Ok(channel) => channel,
             Err(err) => {
                 tracing::warn!("failed to open a thread, answering in place: {err:#}");
@@ -285,7 +306,7 @@ impl EventHandler for Handler {
             .filter(|a| image_type(a).is_some() || is_text(a) || is_document(a))
             .collect();
         let input = Input::Text {
-            content: msg.content,
+            content,
             attachments,
             origin: msg.channel_id,
             message: msg.id,
@@ -295,6 +316,7 @@ impl EventHandler for Handler {
     }
 
     async fn ready(&self, _ctx: Context, ready: Ready) {
+        let _ = self.bot.set(ready.user.id);
         // Printed, not logged, so `mitten serve` shows it at the default log level.
         eprintln!("connected to Discord as {}", ready.user.name);
     }
@@ -311,7 +333,7 @@ impl EventHandler for Handler {
 /// Where `msg` is answered: a new thread off a message in a server text channel, otherwise
 /// the channel itself. A new thread starts with the message's first line as its name, and the
 /// model renames it in the background.
-async fn route(ctx: &Context, msg: &Message, config: &Config) -> Result<ChannelId> {
+async fn route(ctx: &Context, msg: &Message, content: &str, config: &Config) -> Result<ChannelId> {
     let here = msg.channel_id;
     if msg.guild_id.is_none() {
         return Ok(here);
@@ -322,12 +344,12 @@ async fn route(ctx: &Context, msg: &Message, config: &Config) -> Result<ChannelI
     };
     Ok(match channel.kind {
         ChannelType::Text | ChannelType::News => {
-            let thread = CreateThread::new(thread_name(&msg.content))
+            let thread = CreateThread::new(thread_name(content))
                 .auto_archive_duration(AutoArchiveDuration::OneHour);
             let thread = here
                 .create_thread_from_message(&ctx.http, msg.id, thread)
                 .await?;
-            let (http, config, content) = (ctx.http.clone(), config.clone(), msg.content.clone());
+            let (http, config, content) = (ctx.http.clone(), config.clone(), content.to_owned());
             tokio::spawn(async move { rename(&http, thread.id, &config, &content).await });
             thread.id
         }
@@ -355,6 +377,15 @@ async fn rename(http: &Http, thread: ChannelId, config: &Config, content: &str) 
     {
         tracing::warn!("failed to rename thread: {err:#}");
     }
+}
+
+/// `content` without @mentions of `bot`, which only say who the message is for.
+fn strip_mention(content: &str, bot: UserId) -> String {
+    content
+        .replace(&format!("<@{bot}>"), "")
+        .replace(&format!("<@!{bot}>"), "")
+        .trim()
+        .to_owned()
 }
 
 /// The message's first line, shortened to fit a thread name.
@@ -914,6 +945,13 @@ mod tests {
         merge_waiting(&mut rx, 7, &mut content, &mut Vec::new(), &mut messages).await;
         assert!(start.elapsed() < MERGE_CAP + MERGE_QUIET / 2);
         assert!(messages.len() >= 2);
+    }
+
+    #[test]
+    fn strip_mention_drops_only_the_bot() {
+        let bot = UserId::new(42);
+        assert_eq!(strip_mention("<@42> hi <@7>", bot), "hi <@7>");
+        assert_eq!(strip_mention("hi <@!42>", bot), "hi");
     }
 
     #[test]

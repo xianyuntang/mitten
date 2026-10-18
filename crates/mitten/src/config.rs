@@ -381,8 +381,33 @@ impl Default for LogSection {
 #[serde(deny_unknown_fields)]
 pub struct DiscordSection {
     pub token: Secret,
-    /// Discord user IDs allowed to talk to the bot; everyone else is ignored.
+    /// Discord user IDs allowed to talk to the bot in DMs and in servers not listed in `guilds`;
+    /// everyone else is ignored.
     pub allowed_users: Vec<u64>,
+    /// `[discord.guilds.<server ID>]`: rules for one server, used there instead of `allowed_users`.
+    #[serde(default)]
+    pub guilds: BTreeMap<u64, GuildRule>,
+}
+
+impl DiscordSection {
+    /// Who may use the bot in `guild` (`None` for DMs), and whether they must @mention it.
+    pub fn rule(&self, guild: Option<u64>) -> (&[u64], bool) {
+        match guild.and_then(|guild| self.guilds.get(&guild)) {
+            Some(rule) => (&rule.allowed_users, rule.mention),
+            None => (&self.allowed_users, false),
+        }
+    }
+}
+
+/// One server's rules for the Discord bot.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GuildRule {
+    /// Discord user IDs allowed to talk to the bot in this server.
+    pub allowed_users: Vec<u64>,
+    /// Answer only messages that @mention the bot, except in a thread it is already answering in.
+    #[serde(default)]
+    pub mention: bool,
 }
 
 /// Validated settings with every default filled in.
@@ -437,6 +462,13 @@ impl Config {
             .is_some_and(|d| d.allowed_users.is_empty())
         {
             bail!("discord.allowed_users is empty; list your Discord user ID");
+        }
+        if let Some(guild) = file.discord.as_ref().and_then(|d| {
+            d.guilds
+                .iter()
+                .find_map(|(id, rule)| rule.allowed_users.is_empty().then_some(id))
+        }) {
+            bail!("discord.guilds.{guild}.allowed_users is empty; list who may use the bot there");
         }
         let database_path = match file.database.path {
             Some(path) => path,
@@ -708,5 +740,33 @@ mod tests {
         let open_bot =
             "[opencode-go]\napi_key = \"k\"\n[discord]\ntoken = \"t\"\nallowed_users = []";
         assert!(Config::parse(open_bot).is_err());
+    }
+
+    #[test]
+    fn discord_guilds_override_allowed_users() {
+        let base =
+            "[opencode-go]\napi_key = \"k\"\n[discord]\ntoken = \"t\"\nallowed_users = [1]\n";
+        let config = Config::parse(&format!(
+            "{base}[discord.guilds.100]\nallowed_users = [2, 3]\nmention = true\n\
+             [discord.guilds.200]\nallowed_users = [1]\n"
+        ))
+        .expect("valid");
+        let discord = config.discord.expect("discord configured");
+        assert_eq!(discord.rule(None), (&[1][..], false));
+        assert_eq!(discord.rule(Some(100)), (&[2, 3][..], true));
+        assert_eq!(discord.rule(Some(200)), (&[1][..], false));
+        assert_eq!(discord.rule(Some(300)), (&[1][..], false));
+        assert!(
+            Config::parse(&format!("{base}[discord.guilds.100]\nallowed_users = []\n")).is_err()
+        );
+        assert!(
+            Config::parse(&format!("{base}[discord.guilds.x]\nallowed_users = [1]\n")).is_err()
+        );
+        assert!(
+            Config::parse(&format!(
+                "{base}[discord.guilds.100]\nallowed_users = [1]\nmentoin = true\n"
+            ))
+            .is_err()
+        );
     }
 }

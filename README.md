@@ -53,8 +53,8 @@ Mitten can answer you in Discord, by DM or in any server channel it can read.
    add a bot, and copy its token.
 2. Under **Bot**, turn on **Message Content Intent**. Without it the bot cannot connect.
 3. Invite the bot to your server with the permissions **View Channels**, **Send Messages**,
-   **Send Messages in Threads**, **Create Public Threads**, **Read Message History**, and
-   **Add Reactions**.
+   **Send Messages in Threads**, **Create Public Threads**, **Read Message History**,
+   **Add Reactions**, **Attach Files**, and **Embed Links**.
 4. Find your Discord user ID: turn on **Developer Mode** in Discord's settings, then right-click
    your name and choose **Copy User ID**.
 5. Run `mitten configure`, open the **Discord** page, and enter the token and your user ID.
@@ -63,6 +63,12 @@ Mitten can answer you in Discord, by DM or in any server channel it can read.
 How it behaves:
 
 - Only the user IDs you list are heard; everyone else is ignored.
+- Each server can have its own list, and can require an @mention, under **Per-server** in
+  `mitten configure`: `111@: 12, 34; 222: 12` lets users 12 and 34 use server 111, where only
+  @mentions are answered, and user 12 use server 222. In config, that is
+  `[discord.guilds.<server ID>]` with `allowed_users` and `mention = true`. Other servers and DMs
+  use the main list. A thread the bot is already answering in needs no further mention until
+  mitten restarts. To copy a server ID, right-click the server with Developer Mode on.
 - A message in a server channel opens a thread, and each thread is its own conversation.
   Idle threads archive after an hour.
 - Each person has their own memory, shared by all of their threads and DMs; the terminal has one

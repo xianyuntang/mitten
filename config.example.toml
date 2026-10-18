@@ -90,3 +90,11 @@ level = "warn"
 # allowed_users = [123456789012345678]
 # # The bot answers these users in DMs and in every server channel it can read, no @mention needed.
 # # Enable the MESSAGE CONTENT intent for the bot in the Developer Portal, or it cannot connect.
+#
+# # Optional, per server (guild) ID: who may use the bot there, replacing allowed_users.
+# # Servers not listed use allowed_users and need no @mention.
+# [discord.guilds.111111111111111111]
+# allowed_users = [123456789012345678, 234567890123456789]
+# # Answer only messages that @mention the bot (default false). Follow-ups in a thread it is
+# # already answering in need no mention until mitten restarts.
+# mention = true
