@@ -150,7 +150,19 @@ impl Model {
         match self {
             Self::Anthropic(model) => model.completion(request).await,
             Self::Openai(model) => model.completion(request).await,
-            Self::Responses(model) => model.completion(request).await,
+            Self::Responses(model) => {
+                // Turns answered by another model keep that provider's message id, which the
+                // Responses API rejects unless it is one of its own.
+                let mut request = request;
+                for message in &mut request.chat_history {
+                    if let Message::Assistant { id, .. } = message
+                        && id.as_deref().is_some_and(|id| !id.starts_with("msg"))
+                    {
+                        *id = None;
+                    }
+                }
+                model.completion(request).await
+            }
             Self::Gemini(model) => {
                 // Gemini now and then stops on a garbled tool call; asking again usually works.
                 let mut tries = 1;
