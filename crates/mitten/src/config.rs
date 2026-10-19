@@ -15,17 +15,20 @@ const DEFAULT_COMPACT_AT_TOKENS: usize = 100_000;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Api {
-    /// `/messages`: MiniMax and Qwen.
+    /// `/messages`: MiniMax, Qwen, and Claude.
     Anthropic,
     /// `/chat/completions`: GLM, Kimi, DeepSeek, and the rest.
     Openai,
 }
 
 impl Api {
-    /// OpenCode Go serves MiniMax and Qwen in Anthropic format and most others as chat completions.
+    /// OpenCode Go serves MiniMax, Qwen, and Claude in Anthropic format and most others as chat completions.
     // ponytail: name-prefix guess; set `model.api` for anything it gets wrong.
     pub fn for_model(model: &str) -> Self {
-        if model.starts_with("minimax") || model.starts_with("qwen") {
+        if ["minimax", "qwen", "claude"]
+            .iter()
+            .any(|prefix| model.starts_with(prefix))
+        {
             Self::Anthropic
         } else {
             Self::Openai
@@ -90,7 +93,7 @@ struct ModelSection {
     compact_at_tokens: Option<usize>,
 }
 
-/// OpenCode Go serves MiniMax and Qwen models through an Anthropic-format Messages endpoint.
+/// OpenCode Go serves MiniMax, Qwen, and Claude models through an Anthropic-format Messages endpoint.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct OpenCodeGoSection {
@@ -626,6 +629,7 @@ mod tests {
         assert_eq!(config.compact_at_tokens, 100_000);
         assert_eq!(config.base_url, "http://localhost:8080/v1");
         assert_eq!(Api::for_model("glm-5.3"), Api::Openai);
+        assert_eq!(Api::for_model("claude-haiku-5-5"), Api::Anthropic);
         assert_eq!(config.log_level, "warn");
         assert!(config.discord.is_none());
         assert!(

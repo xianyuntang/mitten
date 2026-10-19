@@ -19,7 +19,6 @@ use toml_edit::{Array, DocumentMut, InlineTable, Item, Table};
 /// Common OpenCode Go models; `config::Api::for_model` picks each one's endpoint format.
 pub const MODELS: &[&str] = &[
     "minimax-m3",
-    "minimax-m2.7",
     "qwen3.8-max",
     "qwen3.8-flash",
     "glm-5.3",
@@ -28,6 +27,10 @@ pub const MODELS: &[&str] = &[
     "kimi-k2.7-code",
     "deepseek-v4-pro",
     "deepseek-v4.1-flash",
+    "mimo-v2.6-pro",
+    "mimo-v2.6-flash",
+    "longcat-2.0",
+    "claude-haiku-5-5",
 ];
 const CUSTOM: &str = "Custom…";
 const ENABLED: &str = "Enabled";
