@@ -62,11 +62,13 @@ pub trait Io {
 
 type AnthropicModel = <anthropic::Client as CompletionClient>::CompletionModel;
 type OpenaiModel = <openai::CompletionsClient as CompletionClient>::CompletionModel;
+type ResponsesModel = <openai::Client as CompletionClient>::CompletionModel;
 
 /// The configured model behind whichever OpenCode Go endpoint it speaks.
 pub(crate) enum Model {
     Anthropic(AnthropicModel),
     Openai(OpenaiModel),
+    Responses(ResponsesModel),
 }
 
 impl Model {
@@ -108,6 +110,16 @@ impl Model {
                     .completions_api()
                     .completion_model(&config.model),
             ),
+            Api::Responses => Self::Responses(
+                openai::Client::builder()
+                    .api_key(key)
+                    .base_url(&config.base_url)
+                    .http_client(http)
+                    .http_headers(headers)
+                    .build()
+                    .context("failed to build Responses-format client")?
+                    .completion_model(&config.model),
+            ),
         })
     }
 
@@ -118,6 +130,7 @@ impl Model {
         match self {
             Self::Anthropic(model) => model.completion(request).await,
             Self::Openai(model) => model.completion(request).await,
+            Self::Responses(model) => model.completion(request).await,
         }
     }
 }
@@ -174,6 +187,7 @@ impl std::fmt::Debug for Model {
         f.write_str(match self {
             Self::Anthropic(_) => "Model::Anthropic",
             Self::Openai(_) => "Model::Openai",
+            Self::Responses(_) => "Model::Responses",
         })
     }
 }
@@ -1005,6 +1019,53 @@ mod tests {
         .await
         .expect("parses");
         assert!(delete.risky, "{}", delete.reason);
+    }
+
+    /// Prints what the agent says, approving nothing.
+    struct Print;
+
+    impl Io for Print {
+        async fn say(&mut self, text: &str) -> Result<()> {
+            println!("{text}");
+            Ok(())
+        }
+        async fn confirm(&mut self, _action: &str) -> Result<bool> {
+            Ok(false)
+        }
+    }
+
+    /// Runs a turn that needs a tool call, then a follow-up, on the configured model or
+    /// `MITTEN_TEST_MODEL`: `MITTEN_TEST_MODEL=gpt-6-luna cargo test -- --ignored tool_round_trip`.
+    #[tokio::test]
+    #[ignore = "sends several requests to the configured model"]
+    async fn tool_round_trip_on_the_real_model() {
+        let path = std::env::home_dir()
+            .expect("home")
+            .join(".config/mitten/config.toml");
+        let loaded = Config::load(&path).expect("config loads");
+        let model = std::env::var("MITTEN_TEST_MODEL").unwrap_or(loaded.model.clone());
+        let dir = std::env::temp_dir().join(format!("mitten-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let file = dir.join("note.txt");
+        std::fs::write(&file, "the secret word is pelican").expect("write");
+        let config = Config {
+            api: Api::for_model(&model),
+            model,
+            approval: crate::config::Approval::Ask,
+            ..loaded
+        };
+        let db = Db::open(&dir.join("m.db")).expect("db");
+        let mcp = Arc::new(Mcp::connect(&std::collections::BTreeMap::new()).await);
+        let mut agent = Agent::new(config, db, mcp, "test").await.expect("agent");
+        let prompt = format!("Read {} and tell me the secret word.", file.display());
+        agent
+            .run_turn(&prompt, Vec::new(), None, &mut Print)
+            .await
+            .expect("first turn");
+        agent
+            .run_turn("Spell it backwards.", Vec::new(), None, &mut Print)
+            .await
+            .expect("second turn");
     }
 
     #[test]

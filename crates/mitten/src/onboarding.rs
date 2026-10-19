@@ -31,6 +31,10 @@ pub const MODELS: &[&str] = &[
     "mimo-v2.6-flash",
     "longcat-2.0",
     "claude-haiku-5-5",
+    "gpt-6-luna",
+    "gpt-5.6-luna",
+    "grok-4.7",
+    "muse-spark-1.3-contributor",
 ];
 const CUSTOM: &str = "Custom…";
 const ENABLED: &str = "Enabled";

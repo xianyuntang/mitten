@@ -19,6 +19,8 @@ pub enum Api {
     Anthropic,
     /// `/chat/completions`: GLM, Kimi, DeepSeek, and the rest.
     Openai,
+    /// `/responses`, OpenAI's Responses API: GPT, Grok, and Muse Spark.
+    Responses,
 }
 
 impl Api {
@@ -30,6 +32,11 @@ impl Api {
             .any(|prefix| model.starts_with(prefix))
         {
             Self::Anthropic
+        } else if ["gpt", "grok", "muse"]
+            .iter()
+            .any(|prefix| model.starts_with(prefix))
+        {
+            Self::Responses
         } else {
             Self::Openai
         }
@@ -630,6 +637,7 @@ mod tests {
         assert_eq!(config.base_url, "http://localhost:8080/v1");
         assert_eq!(Api::for_model("glm-5.3"), Api::Openai);
         assert_eq!(Api::for_model("claude-haiku-5-5"), Api::Anthropic);
+        assert_eq!(Api::for_model("gpt-6-luna"), Api::Responses);
         assert_eq!(config.log_level, "warn");
         assert!(config.discord.is_none());
         assert!(
