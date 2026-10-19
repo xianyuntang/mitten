@@ -20,10 +20,10 @@ use crate::files;
 use crate::search::{self, WebSearch};
 
 /// Subagents one call may dispatch; more go in another wave.
-const MAX_AGENTS: usize = 100;
+const MAX_AGENTS: usize = 10;
 /// Subagents running at once; the rest wait their turn.
 // ponytail: fixed; make it a config key if a provider's rate limit needs it lower or allows more.
-const CONCURRENCY: usize = 8;
+const CONCURRENCY: usize = 10;
 /// Model calls one subagent makes before it must report.
 const AGENT_STEPS: usize = 8;
 /// Characters kept from each report, so a full wave fits the orchestrator's context.
@@ -166,8 +166,8 @@ crabs, or swarm mode, call cast_crabs for that request.";
 pub const INSTRUCTION: &str = "\
 [Cast of crabs mode (螃蟹群; a group of crabs is a cast, and mitten is a mitten crab), started by the user with /cast.] \
 Act as an orchestrator for the request below: split it into independent parts and call cast_crabs \
-with many subagents at once instead of doing the parts yourself. Scale the swarm to the job: a \
-broad survey can use dozens to 100 subagents in one wave. Give each a role and one narrow, self-contained task with all the context it needs, since subagents see nothing but \
+with many subagents at once instead of doing the parts yourself. Scale the swarm to the job: up \
+to 10 subagents in one wave, and more waves when a broad survey needs more. Give each a role and one narrow, self-contained task with all the context it needs, since subagents see nothing but \
 their task. Read the reports, then send another wave for gaps, follow-ups, or fact checks if \
 needed, and finally write the answer yourself, resolving disagreements and naming the URLs it \
 relies on.";
