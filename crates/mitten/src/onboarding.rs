@@ -35,6 +35,7 @@ pub const MODELS: &[&str] = &[
     "gpt-5.6-luna",
     "grok-4.7",
     "muse-spark-1.3-contributor",
+    "gemini-4-argon-contributor",
 ];
 const CUSTOM: &str = "Custom…";
 const ENABLED: &str = "Enabled";

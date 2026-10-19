@@ -10,9 +10,9 @@
 [model]
 # Optional. Any OpenCode Go model, e.g. minimax-m3, qwen3.8-max, glm-5.3, kimi-k3, deepseek-v4-pro.
 name = "minimax-m3"
-# Optional. "anthropic" (/messages), "openai" (/chat/completions), or "responses" (/responses);
-# guessed from the name: minimax*/qwen*/claude* use anthropic, gpt*/grok*/muse* responses, and
-# everything else openai.
+# Optional. "anthropic" (/messages), "openai" (/chat/completions), "responses" (/responses), or
+# "gemini" (generateContent); guessed from the name: minimax*/qwen*/claude* use anthropic,
+# gpt*/grok*/muse* responses, gemini* gemini, and everything else openai.
 # api = "anthropic"
 # Optional. Default 16000.
 # max_tokens = 16000

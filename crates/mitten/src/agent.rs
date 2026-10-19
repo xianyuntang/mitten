@@ -13,7 +13,7 @@ use rig_core::completion::{
 use rig_core::message::{
     AssistantContent, Image, Message, ToolCall, ToolResultContent, UserContent,
 };
-use rig_core::providers::{anthropic, openai};
+use rig_core::providers::{anthropic, gemini, openai};
 use serde_json::Value;
 
 use crate::compact;
@@ -63,12 +63,14 @@ pub trait Io {
 type AnthropicModel = <anthropic::Client as CompletionClient>::CompletionModel;
 type OpenaiModel = <openai::CompletionsClient as CompletionClient>::CompletionModel;
 type ResponsesModel = <openai::Client as CompletionClient>::CompletionModel;
+type GeminiModel = <gemini::Client as CompletionClient>::CompletionModel;
 
 /// The configured model behind whichever OpenCode Go endpoint it speaks.
 pub(crate) enum Model {
     Anthropic(AnthropicModel),
     Openai(OpenaiModel),
     Responses(ResponsesModel),
+    Gemini(GeminiModel),
 }
 
 impl Model {
@@ -120,6 +122,16 @@ impl Model {
                     .context("failed to build Responses-format client")?
                     .completion_model(&config.model),
             ),
+            Api::Gemini => Self::Gemini(
+                gemini::Client::builder()
+                    .api_key(key)
+                    .base_url(gemini_base_url(&config.base_url))
+                    .http_client(http)
+                    .http_headers(headers)
+                    .build()
+                    .context("failed to build Gemini-format client")?
+                    .completion_model(&config.model),
+            ),
         })
     }
 
@@ -131,7 +143,17 @@ impl Model {
             Self::Anthropic(model) => model.completion(request).await,
             Self::Openai(model) => model.completion(request).await,
             Self::Responses(model) => model.completion(request).await,
+            Self::Gemini(model) => model.completion(request).await,
         }
+    }
+}
+
+/// OpenCode Go serves Gemini under `/inference/go/google` instead of next to the other formats, so
+/// the default base URL maps there; any other base URL is used as is.
+fn gemini_base_url(base_url: &str) -> String {
+    match base_url.strip_suffix("/zen/go/v1") {
+        Some(origin) => format!("{origin}/inference/go/google"),
+        None => base_url.to_owned(),
     }
 }
 
@@ -188,6 +210,7 @@ impl std::fmt::Debug for Model {
             Self::Anthropic(_) => "Model::Anthropic",
             Self::Openai(_) => "Model::Openai",
             Self::Responses(_) => "Model::Responses",
+            Self::Gemini(_) => "Model::Gemini",
         })
     }
 }
@@ -1057,7 +1080,10 @@ mod tests {
         let db = Db::open(&dir.join("m.db")).expect("db");
         let mcp = Arc::new(Mcp::connect(&std::collections::BTreeMap::new()).await);
         let mut agent = Agent::new(config, db, mcp, "test").await.expect("agent");
-        let prompt = format!("Read {} and tell me the secret word.", file.display());
+        let prompt = format!(
+            "I am Sam. Read {} and tell me the secret word.",
+            file.display()
+        );
         agent
             .run_turn(&prompt, Vec::new(), None, &mut Print)
             .await
@@ -1066,6 +1092,18 @@ mod tests {
             .run_turn("Spell it backwards.", Vec::new(), None, &mut Print)
             .await
             .expect("second turn");
+    }
+
+    #[test]
+    fn gemini_base_url_maps_the_default() {
+        assert_eq!(
+            gemini_base_url("https://opencode.ai/zen/go/v1"),
+            "https://opencode.ai/inference/go/google"
+        );
+        assert_eq!(
+            gemini_base_url("http://localhost:8080"),
+            "http://localhost:8080"
+        );
     }
 
     #[test]
