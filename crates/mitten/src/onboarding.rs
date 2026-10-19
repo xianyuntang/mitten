@@ -1,7 +1,6 @@
 //! `mitten configure`: a step-by-step, full-screen setup with dropdowns.
 
 use std::path::{Path, PathBuf};
-use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use ratatui::DefaultTerminal;
@@ -10,9 +9,7 @@ use ratatui::layout::{Constraint, Flex, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style, Stylize};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Clear, List, ListState, Padding, Paragraph, Wrap};
-use tokio::runtime::Handle;
 
-use crate::agent;
 use crate::config::{self, Config};
 use toml_edit::{Array, DocumentMut, InlineTable, Item, Table};
 
@@ -56,21 +53,16 @@ const ASK_ME: &str = "Ask me every time";
 const AUTO: &str = "Auto (LLM review)";
 const SAME_MODEL: &str = "Same as main model";
 const NEVER_ASK: &str = "Never ask";
-const PING_TIMEOUT: Duration = Duration::from_secs(30);
-/// Frames of the spinner shown while the connection is tested.
-const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
-/// Shows the setup, tests the connection, and saves the config to `path`.
+/// Shows the setup and saves the config to `path`.
 pub async fn run(path: &Path) -> Result<Config> {
     let current = path.exists().then(|| Config::load(path).ok()).flatten();
     let mut form = Form::new(current.as_ref())?;
-    let handle = Handle::current();
     let target = path.to_owned();
-    let saved = tokio::task::spawn_blocking(move || {
-        ratatui::run(|terminal| form.run(terminal, &handle, &target))
-    })
-    .await
-    .context("configure screen panicked")??;
+    let saved =
+        tokio::task::spawn_blocking(move || ratatui::run(|terminal| form.run(terminal, &target)))
+            .await
+            .context("configure screen panicked")??;
     match saved {
         Some(config) => {
             println!("✓ saved {}", path.display());
@@ -141,8 +133,6 @@ struct Form {
     menu: Option<ListState>,
     reveal: bool,
     status: Line<'static>,
-    /// Set after a failed connection test; the next save skips the test.
-    force_save: bool,
     /// `tools.searxng.results` or `tools.brave.results`, not on the form; kept so saving doesn't
     /// reset a hand-edited value.
     search_results: usize,
@@ -397,7 +387,6 @@ impl Form {
             menu: None,
             reveal: false,
             status: Line::default(),
-            force_save: false,
             search_results: search.map_or(5, config::Search::results),
             mcp_names,
             guilds,
@@ -462,12 +451,7 @@ impl Form {
     }
 
     /// Runs the event loop; `Some` once saved, `None` if the user quit.
-    fn run(
-        &mut self,
-        terminal: &mut DefaultTerminal,
-        handle: &Handle,
-        path: &Path,
-    ) -> Result<Option<Config>> {
+    fn run(&mut self, terminal: &mut DefaultTerminal, path: &Path) -> Result<Option<Config>> {
         loop {
             terminal.draw(|frame| self.draw(frame))?;
             let Event::Key(key) = event::read()? else {
@@ -510,12 +494,12 @@ impl Form {
                     self.reveal = !self.reveal;
                 }
                 KeyCode::Char('s') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                    if let Some(config) = self.save(terminal, handle, path)? {
+                    if let Some(config) = self.save(path)? {
                         return Ok(Some(config));
                     }
                 }
                 KeyCode::Enter if self.focus == BUTTON => {
-                    if let Some(config) = self.save(terminal, handle, path)? {
+                    if let Some(config) = self.save(path)? {
                         return Ok(Some(config));
                     }
                 }
@@ -541,18 +525,12 @@ impl Form {
         }
     }
 
-    /// Any edit means a previous failed connection test no longer applies.
+    /// Any edit clears a previous save error.
     fn edited(&mut self) {
-        self.force_save = false;
         self.status = Line::default();
     }
 
-    fn save(
-        &mut self,
-        terminal: &mut DefaultTerminal,
-        handle: &Handle,
-        path: &Path,
-    ) -> Result<Option<Config>> {
+    fn save(&mut self, path: &Path) -> Result<Option<Config>> {
         self.attempted = true;
         // Steps can be skipped with ←→, so check them all and show the first one with a problem.
         if let Some((step, err)) =
@@ -580,37 +558,6 @@ impl Form {
         let text = merge_mcp(&render_toml(&answers), old.as_deref(), &remove, add);
         let config = Config::parse(&text).context("form produced an invalid config")?;
 
-        if !self.force_save {
-            let result = handle.block_on(async {
-                let ping = tokio::time::timeout(PING_TIMEOUT, agent::ping(&config));
-                tokio::pin!(ping);
-                let mut tick = tokio::time::interval(Duration::from_millis(80));
-                let mut frame = 0;
-                loop {
-                    tokio::select! {
-                        result = &mut ping => {
-                            return result
-                                .map_err(|_| anyhow::anyhow!("no reply in {PING_TIMEOUT:?}"))?;
-                        }
-                        _ = tick.tick() => {
-                            let spin = SPINNER[frame % SPINNER.len()];
-                            frame += 1;
-                            self.status = Line::from(format!(
-                                " {spin} testing connection to {}…",
-                                config.model
-                            ))
-                            .yellow();
-                            terminal.draw(|f| self.draw(f))?;
-                        }
-                    }
-                }
-            });
-            if let Err(err) = result {
-                self.status = Line::from(format!("✗ {err:#}  (Enter again saves anyway)")).red();
-                self.force_save = true;
-                return Ok(None);
-            }
-        }
         config::write(path, &text)?;
         Ok(Some(config))
     }

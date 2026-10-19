@@ -39,7 +39,7 @@ mitten configure   # full-screen setup; ←/→ switch pages, Save on any page
 mitten             # chat in the terminal
 ```
 
-`mitten configure` asks for your API key and model, tests the connection, and writes
+`mitten configure` asks for your API key and model and writes
 `~/.config/mitten/config.toml`. Only the **Model** page is required.
 
 In the terminal chat, `/new` starts a fresh conversation, `/cast <request>` sends out a cast of crabs (see `cast_crabs` under Tools), and `/exit` (or Ctrl-C) quits.
