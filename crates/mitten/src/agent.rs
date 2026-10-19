@@ -122,7 +122,12 @@ impl Model {
                     .context("failed to build Responses-format client")?
                     .completion_model(&config.model),
             ),
-            Api::Gemini => Self::Gemini(
+            Api::Gemini => Self::Gemini({
+                // rig sends the key only as `?key=`, which OpenCode Go doesn't read.
+                headers.insert(
+                    "x-goog-api-key",
+                    HeaderValue::from_str(key).context("invalid API key")?,
+                );
                 gemini::Client::builder()
                     .api_key(key)
                     .base_url(gemini_base_url(&config.base_url))
@@ -130,8 +135,8 @@ impl Model {
                     .http_headers(headers)
                     .build()
                     .context("failed to build Gemini-format client")?
-                    .completion_model(&config.model),
-            ),
+                    .completion_model(&config.model)
+            }),
         })
     }
 
