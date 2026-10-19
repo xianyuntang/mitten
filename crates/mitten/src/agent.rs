@@ -60,6 +60,9 @@ pub trait Io {
     }
 }
 
+/// Times a Gemini request is sent before a malformed response counts as an error.
+const GEMINI_TRIES: u32 = 3;
+
 type AnthropicModel = <anthropic::Client as CompletionClient>::CompletionModel;
 type OpenaiModel = <openai::CompletionsClient as CompletionClient>::CompletionModel;
 type ResponsesModel = <openai::Client as CompletionClient>::CompletionModel;
@@ -148,7 +151,21 @@ impl Model {
             Self::Anthropic(model) => model.completion(request).await,
             Self::Openai(model) => model.completion(request).await,
             Self::Responses(model) => model.completion(request).await,
-            Self::Gemini(model) => model.completion(request).await,
+            Self::Gemini(model) => {
+                // Gemini now and then stops on a garbled tool call; asking again usually works.
+                let mut tries = 1;
+                loop {
+                    match model.completion(request.clone()).await {
+                        Err(CompletionError::ResponseError(err))
+                            if tries < GEMINI_TRIES && err.contains("finish_reason=Malformed") =>
+                        {
+                            tracing::warn!("retrying a malformed Gemini response: {err}");
+                            tries += 1;
+                        }
+                        result => return result,
+                    }
+                }
+            }
         }
     }
 }
