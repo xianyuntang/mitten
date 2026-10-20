@@ -6,10 +6,11 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 
-const DEFAULT_BASE_URL: &str = "https://opencode.ai/zen/go/v1";
+pub const DEFAULT_BASE_URL: &str = "https://opencode.ai/zen/go/v1";
 const DEFAULT_MODEL: &str = "minimax-m3";
-const DEFAULT_MAX_TOKENS: u32 = 16_000;
-const DEFAULT_COMPACT_AT_TOKENS: usize = 200_000;
+pub const DEFAULT_MAX_TOKENS: u32 = 16_000;
+pub const DEFAULT_COMPACT_AT_TOKENS: usize = 200_000;
+pub const MIN_COMPACT_AT_TOKENS: usize = 10_000;
 
 /// Which OpenCode Go endpoint format a model speaks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -26,6 +27,18 @@ pub enum Api {
 }
 
 impl Api {
+    pub const ALL: [Self; 4] = [Self::Anthropic, Self::Openai, Self::Responses, Self::Gemini];
+
+    /// The name `model.api` takes.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Anthropic => "anthropic",
+            Self::Openai => "openai",
+            Self::Responses => "responses",
+            Self::Gemini => "gemini",
+        }
+    }
+
     /// OpenCode Go serves MiniMax, Qwen, and Claude in Anthropic format and most others as chat completions.
     // ponytail: name-prefix guess; set `model.api` for anything it gets wrong.
     pub fn for_model(model: &str) -> Self {
@@ -476,8 +489,8 @@ impl Config {
             .model
             .compact_at_tokens
             .unwrap_or(DEFAULT_COMPACT_AT_TOKENS);
-        if compact_at_tokens < 10_000 {
-            bail!("model.compact_at_tokens must be at least 10000");
+        if compact_at_tokens < MIN_COMPACT_AT_TOKENS {
+            bail!("model.compact_at_tokens must be at least {MIN_COMPACT_AT_TOKENS}");
         }
         for (name, server) in &file.mcp.servers {
             server.validate(name)?;

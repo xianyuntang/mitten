@@ -33,13 +33,11 @@ Change all of these in the same commit:
 5. **`crates/mokuzu/src/settings.rs`** (agent's `settings` tool): add the key to `KEYS`
    only if the model should be able to change it. Never add secrets.
 
-## Keys the form doesn't show
+## No hidden keys
 
-Avoid them. If a key truly doesn't belong on the form (rarely touched, like
-`tools.searxng.results`), keep its value across saves: add it to `HIDDEN` in onboarding.rs,
-which copies it from the old file as written, or store it on `Form` (see `search_results`) and
-write it back in `render_toml`. Otherwise
-`mokuzu configure` silently resets a hand-edited value.
+Every key goes on the form, even rarely touched ones (they go in Advanced). A key missing from
+the form is silently reset by `mokuzu configure`. Write optional keys only when they differ from
+their default (see `ModelOptions`), so the file follows later changes to defaults.
 
 ## Verify
 

@@ -10,7 +10,7 @@ use ratatui::style::{Color, Modifier, Style, Stylize};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Clear, List, ListState, Padding, Paragraph, Wrap};
 
-use crate::config::{self, Config};
+use crate::config::{self, Api, Config};
 use toml_edit::{Array, DocumentMut, InlineTable, Item, Table};
 
 /// Common OpenCode Go models; `config::Api::for_model` picks each one's endpoint format.
@@ -53,6 +53,7 @@ const ASK_ME: &str = "Ask me every time";
 const AUTO: &str = "Auto (LLM review)";
 const SAME_MODEL: &str = "Same as main model";
 const NEVER_ASK: &str = "Never ask";
+const API_AUTO: &str = "Auto (from model name)";
 
 /// Shows the setup and saves the config to `path`.
 pub async fn run(path: &Path) -> Result<Config> {
@@ -118,9 +119,14 @@ const GUILD_ADD: usize = 25;
 const GUILD_ID: usize = 26;
 const GUILD_USERS: usize = 27;
 const GUILD_REPLY: usize = 28;
+const SEARCH_RESULTS: usize = 29;
+const API: usize = 30;
+const BASE_URL: usize = 31;
+const MAX_TOKENS: usize = 32;
+const COMPACT_AT: usize = 33;
 /// First of the rows for already configured MCP servers, followed by the configured Discord
 /// servers' rows.
-const MCP_FIRST: usize = 29;
+const MCP_FIRST: usize = 34;
 
 /// Focus value for the Save button under the fields.
 const BUTTON: usize = usize::MAX;
@@ -133,9 +139,6 @@ struct Form {
     menu: Option<ListState>,
     reveal: bool,
     status: Line<'static>,
-    /// `tools.searxng.results` or `tools.brave.results`, not on the form; kept so saving doesn't
-    /// reset a hand-edited value.
-    search_results: usize,
     /// Configured MCP servers, one Keep / Remove row each from `MCP_FIRST` on.
     mcp_names: Vec<String>,
     /// Configured Discord servers, one Keep / Remove row each after the MCP rows.
@@ -345,6 +348,48 @@ impl Form {
             Kind::Select(options(&[EVERY_MESSAGE, MENTIONED])),
             EVERY_MESSAGE.to_owned(),
         ));
+        fields.push(field(
+            2,
+            "Results",
+            Kind::Text,
+            search.map_or(5, config::Search::results).to_string(),
+        ));
+        let api = match current {
+            Some(c) if c.api != Api::for_model(&c.model) => c.api.name(),
+            _ => API_AUTO,
+        };
+        let mut apis = vec![API_AUTO];
+        apis.extend(Api::ALL.map(Api::name));
+        fields.push(field(
+            4,
+            "API format",
+            Kind::Select(options(&apis)),
+            api.to_owned(),
+        ));
+        fields.push(field(
+            4,
+            "Base URL",
+            Kind::Text,
+            current
+                .map_or(config::DEFAULT_BASE_URL, |c| c.base_url.as_str())
+                .to_owned(),
+        ));
+        fields.push(field(
+            4,
+            "Max output tokens",
+            Kind::Text,
+            current
+                .map_or(config::DEFAULT_MAX_TOKENS, |c| c.max_tokens)
+                .to_string(),
+        ));
+        fields.push(field(
+            4,
+            "Compact at tokens",
+            Kind::Text,
+            current
+                .map_or(config::DEFAULT_COMPACT_AT_TOKENS, |c| c.compact_at_tokens)
+                .to_string(),
+        ));
         let mcp_names: Vec<String> = current
             .map(|c| c.mcp.keys().cloned().collect())
             .unwrap_or_default();
@@ -387,7 +432,6 @@ impl Form {
             menu: None,
             reveal: false,
             status: Line::default(),
-            search_results: search.map_or(5, config::Search::results),
             mcp_names,
             guilds,
             attempted: false,
@@ -411,6 +455,7 @@ impl Form {
                 }
                 i if i >= self.guild_first() => self.fields[DISCORD].value == ENABLED,
                 SEARCH_URL | SEARCH_USER | SEARCH_PASSWORD => self.fields[SEARCH].value == SEARXNG,
+                SEARCH_RESULTS => self.fields[SEARCH].value != DISABLED,
                 BRAVE_KEY => self.fields[SEARCH].value == BRAVE,
                 MCP_NAME | MCP_APPROVE => self.fields[MCP_ADD].value != NO,
                 MCP_COMMAND | MCP_ARGS | MCP_ENV => self.fields[MCP_ADD].value == STDIO,
@@ -555,8 +600,7 @@ impl Form {
             }
         };
         let old = std::fs::read_to_string(path).ok();
-        let text = keep_hidden(&render_toml(&answers), old.as_deref());
-        let text = merge_mcp(&text, old.as_deref(), &remove, add);
+        let text = merge_mcp(&render_toml(&answers), old.as_deref(), &remove, add);
         let config = Config::parse(&text).context("form produced an invalid config")?;
 
         config::write(path, &text)?;
@@ -594,6 +638,7 @@ impl Form {
             _ => {
                 self.required(DATABASE)?;
                 self.timezone()?;
+                self.model_options()?;
             }
         }
         Ok(())
@@ -604,6 +649,48 @@ impl Form {
             self.required(CUSTOM_MODEL)
         } else {
             self.required(MODEL)
+        }
+    }
+
+    /// The `[model]` and `[opencode-go]` settings past name and key; each is `None` when it
+    /// is the default, so the file follows later changes to defaults.
+    fn model_options(&self) -> std::result::Result<ModelOptions, String> {
+        let api = self.value(API);
+        let base_url = self.value(BASE_URL);
+        Ok(ModelOptions {
+            api: (api != API_AUTO).then_some(api),
+            base_url: (!base_url.is_empty() && base_url != config::DEFAULT_BASE_URL)
+                .then_some(base_url),
+            max_tokens: self
+                .number(MAX_TOKENS, 1)?
+                .filter(|&n| n != config::DEFAULT_MAX_TOKENS),
+            compact_at_tokens: self
+                .number(COMPACT_AT, config::MIN_COMPACT_AT_TOKENS)?
+                .filter(|&n| n != config::DEFAULT_COMPACT_AT_TOKENS),
+        })
+    }
+
+    /// Field `i` as a number of at least `min`; `None` when empty.
+    fn number<T>(&self, i: usize, min: T) -> std::result::Result<Option<T>, String>
+    where
+        T: std::str::FromStr + PartialOrd + std::fmt::Display,
+    {
+        let value = self.value(i);
+        if value.is_empty() {
+            return Ok(None);
+        }
+        let label = &self.fields[i].label;
+        match value.parse::<T>() {
+            Ok(n) if n >= min => Ok(Some(n)),
+            _ => Err(format!("{label} must be a whole number of at least {min}")),
+        }
+    }
+
+    /// Search results per query, 1 to 20; 5 when empty.
+    fn search_results(&self) -> std::result::Result<usize, String> {
+        match self.number(SEARCH_RESULTS, 1)? {
+            Some(n) if n > 20 => Err("Results must be between 1 and 20".to_owned()),
+            n => Ok(n.unwrap_or(5)),
         }
     }
 
@@ -669,7 +756,7 @@ impl Form {
             BRAVE => {
                 return Ok(Some(SearchAnswers::Brave {
                     api_key: self.required(BRAVE_KEY)?,
-                    results: self.search_results,
+                    results: self.search_results()?,
                 }));
             }
             _ => return Ok(None),
@@ -686,7 +773,7 @@ impl Form {
         Ok(Some(SearchAnswers::Searxng {
             url,
             auth,
-            results: self.search_results,
+            results: self.search_results()?,
         }))
     }
 
@@ -763,6 +850,7 @@ impl Form {
             }),
             database: PathBuf::from(self.required(DATABASE)?),
             timezone: self.timezone()?,
+            options: self.model_options()?,
         })
     }
 
@@ -982,6 +1070,9 @@ impl Form {
             GUILD_ID => parse_server_id(&value).err(),
             GUILD_USERS if value != "*" => parse_user_ids(&value).err(),
             TIMEZONE => self.timezone().err(),
+            SEARCH_RESULTS => self.search_results().err(),
+            MAX_TOKENS => self.number::<u32>(i, 1).err(),
+            COMPACT_AT => self.number(i, config::MIN_COMPACT_AT_TOKENS).err(),
             SEARCH_URL | MCP_URL => (!value.starts_with("http://")
                 && !value.starts_with("https://"))
             .then(|| "must start with http:// or https://".to_owned()),
@@ -991,7 +1082,17 @@ impl Form {
 }
 
 /// Fields whose value is checked as it is typed, so a valid one gets a ✓.
-const CHECKED: &[usize] = &[USERS, GUILD_ID, GUILD_USERS, TIMEZONE, SEARCH_URL, MCP_URL];
+const CHECKED: &[usize] = &[
+    USERS,
+    GUILD_ID,
+    GUILD_USERS,
+    TIMEZONE,
+    SEARCH_URL,
+    MCP_URL,
+    SEARCH_RESULTS,
+    MAX_TOKENS,
+    COMPACT_AT,
+];
 
 /// Background of the focused row.
 const FOCUS_BG: Color = Color::Indexed(236);
@@ -1043,6 +1144,17 @@ fn help(i: usize) -> (&'static str, &'static str) {
         }
         REVIEWER => "The model that reviews actions when approval is Auto.",
         TIMEZONE => "IANA name like Asia/Taipei, for message times and scheduled jobs.",
+        SEARCH_RESULTS => "How many results each web search returns, 1 to 20.",
+        API => {
+            "Which format the model's endpoint speaks. Auto guesses from the model name; pick one \
+             if it guesses wrong."
+        }
+        BASE_URL => "OpenCode Go endpoint. Change it only for a proxy or mirror.",
+        MAX_TOKENS => "Longest reply the model may write, in tokens.",
+        COMPACT_AT => {
+            "When the conversation grows past about this many tokens, old tool output is cleared \
+             and older turns are summarized. Lower it for models with a smaller context window."
+        }
         0 => "Where Mokuzu's model runs. Only OpenCode Go for now.",
         _ => "Keep it, or Remove it.",
     };
@@ -1146,6 +1258,15 @@ struct Answers {
     database: PathBuf,
     /// `None` follows this machine's time zone.
     timezone: Option<String>,
+    options: ModelOptions,
+}
+
+#[derive(Default)]
+struct ModelOptions {
+    api: Option<String>,
+    base_url: Option<String>,
+    max_tokens: Option<u32>,
+    compact_at_tokens: Option<usize>,
 }
 
 /// MCP servers to remove, and one to add as `(name, table)`.
@@ -1183,33 +1304,6 @@ fn merge_mcp(
     new.to_string()
 }
 
-/// Keys the form doesn't show, as `(table, key)`.
-const HIDDEN: &[(&str, &str)] = &[
-    ("model", "api"),
-    ("model", "max_tokens"),
-    ("model", "compact_at_tokens"),
-    ("opencode-go", "base_url"),
-];
-
-/// `text` with the `HIDDEN` keys set in the `old` config file carried over as written, so saving
-/// doesn't reset a hand-edited value.
-fn keep_hidden(text: &str, old: Option<&str>) -> String {
-    let (Ok(mut new), Some(Ok(old))) = (
-        text.parse::<DocumentMut>(),
-        old.map(str::parse::<DocumentMut>),
-    ) else {
-        return text.to_owned();
-    };
-    for (table, key) in HIDDEN {
-        if let Some(value) = old.get(table).and_then(|t| t.get(key))
-            && let Some(table) = new.get_mut(table).and_then(Item::as_table_mut)
-        {
-            table.insert(key, value.clone());
-        }
-    }
-    new.to_string()
-}
-
 /// Quotes and escapes a TOML string.
 fn quote(text: &str) -> String {
     toml::Value::String(text.to_owned()).to_string()
@@ -1221,21 +1315,34 @@ fn render_toml(answers: &Answers) -> String {
     if let Some(zone) = &answers.timezone {
         text.push_str(&format!("\ntimezone = {}\n", quote(zone)));
     }
+    let options = &answers.options;
+    let mut model = format!("name = {}\n", quote(&answers.model));
+    if let Some(api) = &options.api {
+        model.push_str(&format!("api = {}\n", quote(api)));
+    }
+    if let Some(n) = options.max_tokens {
+        model.push_str(&format!("max_tokens = {n}\n"));
+    }
+    if let Some(n) = options.compact_at_tokens {
+        model.push_str(&format!("compact_at_tokens = {n}\n"));
+    }
+    let mut opencode = format!("api_key = {}\n", quote(&answers.api_key));
+    if let Some(url) = &options.base_url {
+        opencode.push_str(&format!("base_url = {}\n", quote(url)));
+    }
     text.push_str(&format!(
         "\n\
          [model]\n\
-         name = {model}\n\
+         {model}\
          \n\
          [opencode-go]\n\
-         api_key = {key}\n\
+         {opencode}\
          \n\
          [log]\n\
          level = {log}\n\
          \n\
          [database]\n\
          path = {db}\n",
-        model = quote(&answers.model),
-        key = quote(&answers.api_key),
         log = quote(&answers.log_level),
         db = quote(&answers.database.to_string_lossy()),
     ));
@@ -1326,22 +1433,6 @@ mod tests {
     }
 
     #[test]
-    fn keep_hidden_carries_over_keys_the_form_lacks() {
-        let new = "[model]\nname = \"glm-5.3\"\n\n[opencode-go]\napi_key = \"k\"\n";
-        let old = "[model]\nname = \"old\"\nmax_tokens = 8000\ncompact_at_tokens = 50000\n\n\
-                   [opencode-go]\napi_key = \"old\"\nbase_url = \"https://proxy.example/v1\"\n";
-        let config = Config::parse(&keep_hidden(new, Some(old))).expect("valid");
-        assert_eq!(config.model, "glm-5.3");
-        assert_eq!(config.api_key.as_str(), "k");
-        assert_eq!(
-            (config.max_tokens, config.compact_at_tokens),
-            (8000, 50_000)
-        );
-        assert_eq!(config.base_url, "https://proxy.example/v1");
-        assert_eq!(keep_hidden(new, None), new);
-    }
-
-    #[test]
     fn merge_mcp_keeps_removes_and_adds_servers() {
         let new = "[opencode-go]\napi_key = \"k\"\n";
         let old = "[opencode-go]\napi_key = \"old\"\n\n\
@@ -1397,9 +1488,21 @@ mod tests {
             auto_approval: Some(Some("glm-5.3-flash".to_owned())),
             database: PathBuf::from("/tmp/m.db"),
             timezone: Some("Asia/Taipei".to_owned()),
+            options: ModelOptions {
+                api: Some("openai".to_owned()),
+                base_url: Some("https://proxy.example/v1".to_owned()),
+                max_tokens: Some(8000),
+                compact_at_tokens: Some(50_000),
+            },
         });
         let config = Config::parse(&text).expect("valid");
         assert_eq!(config.timezone, chrono_tz::Tz::Asia__Taipei);
+        assert_eq!(config.api, Api::Openai);
+        assert_eq!(config.base_url, "https://proxy.example/v1");
+        assert_eq!(
+            (config.max_tokens, config.compact_at_tokens),
+            (8000, 50_000)
+        );
         assert_eq!(config.model, "qwen3.8-max");
         assert_eq!(
             config.approval,
@@ -1413,6 +1516,12 @@ mod tests {
         assert!(discord.mention_only(Some(100)) && discord.can_talk(Some(100), 2));
         assert_eq!(discord.guilds[&200].allowed_users, config::Users::Everyone);
         let mut reopened = Form::new(Some(&config)).expect("form");
+        assert_eq!(reopened.value(API), "openai");
+        assert_eq!(reopened.value(COMPACT_AT), "50000");
+        assert_eq!(
+            reopened.model_options().expect("valid").max_tokens,
+            Some(8000)
+        );
         let first = reopened.guild_first();
         assert_eq!(reopened.fields[first].label, "100");
         assert_eq!(
@@ -1461,6 +1570,7 @@ mod tests {
             auto_approval: None,
             database: PathBuf::from("/tmp/m.db"),
             timezone: None,
+            options: ModelOptions::default(),
         });
         let config = Config::parse(&text).expect("valid");
         let Some(config::Search::Brave(brave)) = &config.search else {
@@ -1534,13 +1644,27 @@ mod tests {
             "username without password"
         );
         form.fields[SEARCH_PASSWORD].value = "pw".to_owned();
+        form.fields[SEARCH_RESULTS].value = "21".to_owned();
+        assert!(form.check_step(form.step).is_err(), "at most 20 results");
+        form.fields[SEARCH_RESULTS].value = "8".to_owned();
         form.check_step(form.step).expect("search step valid");
 
         form.step = 4;
         form.fields[TIMEZONE].value = "Taipei".to_owned();
         assert!(form.check_step(form.step).is_err(), "not an IANA name");
         form.fields[TIMEZONE].value = "Asia/Taipei".to_owned();
+        form.fields[COMPACT_AT].value = "500".to_owned();
+        assert!(form.check_step(form.step).is_err(), "below the minimum");
+        assert!(form.field_error(COMPACT_AT).is_some());
+        form.fields[COMPACT_AT].value = config::DEFAULT_COMPACT_AT_TOKENS.to_string();
         form.check_step(form.step).expect("advanced step valid");
+        assert!(
+            form.model_options()
+                .expect("valid")
+                .compact_at_tokens
+                .is_none(),
+            "defaults aren't written"
+        );
 
         let answers = form.answers().expect("all steps valid");
         assert_eq!(answers.model, "qwen-next");

@@ -177,8 +177,9 @@ The model cannot turn on auto mode itself; only `mokuzu configure` or the config
 ## Configuration
 
 Everything lives in `~/.config/mokuzu/config.toml` (or pass `--config PATH`).
-[`config.example.toml`](config.example.toml) documents every option. `mokuzu configure` keeps
-settings it doesn't show, such as MCP servers you added by hand. Most changes apply from the next
+[`config.example.toml`](config.example.toml) documents every option, and `mokuzu configure`
+can set each of them (the less common ones under **Advanced**). MCP servers you added by hand
+are kept as written. Most changes apply from the next
 message; MCP servers, web search, and Discord need a restart.
 
 ## Development
