@@ -939,6 +939,7 @@ impl Agent {
                                 config: &self.config,
                                 search,
                                 fetcher: &self.fetcher,
+                                mcp: &self.mcp,
                             };
                             let now = now(self.config.timezone);
                             swarm::run(&self.model, tools, &now, &call.function.arguments, io)

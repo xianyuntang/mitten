@@ -31,6 +31,8 @@ pub struct Mcp {
     servers: Vec<Server>,
     /// Every server's tools, as sent to the model.
     definitions: Vec<ToolDefinition>,
+    /// Tools of servers with `approve = false`, which swarm crabs may call too.
+    unapproved: Vec<ToolDefinition>,
 }
 
 struct Server {
@@ -73,6 +75,9 @@ impl Mcp {
                 server.name,
                 server.tools.len()
             );
+            if !server.approve {
+                mcp.unapproved.extend(definitions.iter().cloned());
+            }
             mcp.definitions.extend(definitions);
             mcp.servers.push(server);
         }
@@ -92,6 +97,30 @@ impl Mcp {
         })?;
         Some(server.call(tool, args, io).await)
     }
+
+    /// Tools that run without asking: those of servers with `approve = false`.
+    pub fn unapproved_tools(&self) -> &[ToolDefinition] {
+        &self.unapproved
+    }
+
+    /// Runs `name` if it comes from a server with `approve = false`, with no one to ask or tell,
+    /// as swarm crabs do. Returns `None` for any other name.
+    pub async fn call_unapproved(&self, name: &str, args: &Value) -> Option<String> {
+        let (server, tool) = self
+            .servers
+            .iter()
+            .filter(|s| !s.approve)
+            .find_map(|server| {
+                let (_, tool) = server.tools.iter().find(|(exposed, _)| exposed == name)?;
+                Some((server, tool))
+            })?;
+        let (output, ok) = server.invoke(tool, args).await;
+        Some(if ok {
+            output
+        } else {
+            format!("error: {output}")
+        })
+    }
 }
 
 impl Server {
@@ -108,11 +137,24 @@ impl Server {
         } else {
             io.note(&format!("🔌 {} → {tool}", self.name)).await?;
         }
+        let (output, ok) = self.invoke(tool, args).await;
+        if self.approve {
+            io.ran(&output, ok).await?;
+        }
+        Ok(if ok {
+            output
+        } else {
+            format!("error: {output}")
+        })
+    }
+
+    /// Calls `tool` on the server: its output, and whether it succeeded.
+    async fn invoke(&self, tool: &str, args: &Value) -> (String, bool) {
         let mut params = CallToolRequestParams::new(tool.to_owned());
         if let Value::Object(args) = args {
             params = params.with_arguments(args.clone());
         }
-        let (output, ok) = match self.client.call_tool(params).await {
+        match self.client.call_tool(params).await {
             Ok(result) => {
                 let mut text: Vec<String> = result.content.iter().map(describe).collect();
                 if text.is_empty()
@@ -123,15 +165,7 @@ impl Server {
                 (truncate(text.join("\n")), result.is_error != Some(true))
             }
             Err(err) => (format!("{err:#}"), false),
-        };
-        if self.approve {
-            io.ran(&output, ok).await?;
         }
-        Ok(if ok {
-            output
-        } else {
-            format!("error: {output}")
-        })
     }
 }
 

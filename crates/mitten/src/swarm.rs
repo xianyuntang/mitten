@@ -1,6 +1,6 @@
 //! `cast_crabs` tool: the calling model acts as an orchestrator and dispatches a wave of subagents, each
 //! with its own role, task, and history, that work in parallel with the read-only web and file
-//! tools and report back. The orchestrator reads the reports and sends further waves as needed.
+//! tools, plus MCP tools of servers with `approve = false`, and report back. The orchestrator reads the reports and sends further waves as needed.
 
 use std::hash::{BuildHasher, RandomState};
 use std::time::Duration;
@@ -17,6 +17,7 @@ use crate::config::Config;
 use crate::document;
 use crate::fetch::{self, Fetcher};
 use crate::files;
+use crate::mcp::Mcp;
 use crate::search::{self, WebSearch};
 
 /// Subagents one call may dispatch; more go in another wave.
@@ -181,7 +182,7 @@ pub fn request(prompt: &str) -> Option<&str> {
 const AGENT: &str = "\
 You are a subagent in a swarm; an orchestrator gave you one task and will combine your report \
 with others. Do only your task, using web_search and fetch_url (and read_file or list_dir for \
-local files, and view_pdf to look at a PDF's pages). Prefer primary and official sources, check dates, and read promising pages rather \
+local files, view_pdf to look at a PDF's pages, and any other tools you are given). Prefer primary and official sources, check dates, and read promising pages rather \
 than relying on snippets. Reply with a report under 200 words: the findings, the source URL after \
 each claim, and what you could not find or verify. Never fabricate.";
 
@@ -190,8 +191,8 @@ pub fn tool() -> ToolDefinition {
         name: "cast_crabs".to_owned(),
         description: format!(
             "Dispatch a wave of up to {MAX_AGENTS} subagents that work in parallel, each searching \
-             the web and reading pages or local files for its own task, and return their reports. \
-             Subagents only read; they cannot spawn subagents."
+             the web, reading pages or local files, and calling MCP tools that need no approval \
+             for its own task, and return their reports. They cannot spawn subagents."
         ),
         parameters: json!({
             "type": "object",
@@ -214,12 +215,13 @@ pub fn tool() -> ToolDefinition {
     }
 }
 
-/// What a subagent may use: the web and local files, read-only.
+/// What a subagent may use: the web, local files, and MCP servers that need no approval.
 #[derive(Debug, Clone, Copy)]
 pub struct Tools<'a> {
     pub config: &'a Config,
     pub search: &'a WebSearch,
     pub fetcher: &'a Fetcher,
+    pub mcp: &'a Mcp,
 }
 
 #[derive(Debug, PartialEq)]
@@ -359,7 +361,7 @@ async fn work(
     for round in 1..=AGENT_STEPS {
         step("💭 thinking".to_owned());
         let response = match model
-            .complete(agent_request(tools.config, &system, &messages))
+            .complete(agent_request(tools, &system, &messages))
             .await
         {
             Ok(response) => response,
@@ -401,7 +403,10 @@ async fn work(
                 }
                 "read_file" => files::read(tools.config, args).await,
                 "list_dir" => files::list(tools.config, args).await,
-                other => format!("error: unknown tool `{other}`"),
+                other => match tools.mcp.call_unapproved(other, args).await {
+                    Some(output) => output,
+                    None => format!("error: unknown tool `{other}`"),
+                },
             };
             results.push(UserContent::tool_result_for(
                 call.id.clone(),
@@ -421,8 +426,8 @@ async fn work(
     format!("{last}\n(stopped at the step limit)")
 }
 
-fn agent_request(config: &Config, system: &str, messages: &[Message]) -> CompletionRequest {
-    let mut request = agent::request(config, system, messages, &[]);
+fn agent_request(tools: Tools<'_>, system: &str, messages: &[Message]) -> CompletionRequest {
+    let mut request = agent::request(tools.config, system, messages, &[]);
     request.tools = vec![
         search::tool(),
         fetch::tool(),
@@ -430,6 +435,9 @@ fn agent_request(config: &Config, system: &str, messages: &[Message]) -> Complet
         files::list_tool(),
         document::view_tool(),
     ];
+    request
+        .tools
+        .extend(tools.mcp.unapproved_tools().iter().cloned());
     request
 }
 
@@ -442,7 +450,7 @@ fn describe(tool: &str, args: &Value) -> String {
         "read_file" => format!("📄 {}", arg("path")),
         "list_dir" => format!("📁 {}", arg("path")),
         "view_pdf" => format!("🖼️ {}{}", arg("path"), arg("url")),
-        other => other.to_owned(),
+        other => format!("🔌 {other}"),
     }
 }
 
