@@ -95,7 +95,7 @@ impl Fetcher {
         });
         let client = reqwest::Client::builder()
             .timeout(TIMEOUT)
-            .user_agent(concat!("mitten/", env!("CARGO_PKG_VERSION")))
+            .user_agent(concat!("mokuzu/", env!("CARGO_PKG_VERSION")))
             .dns_resolver(Arc::new(PublicOnly))
             .redirect(redirects)
             .build()
@@ -202,7 +202,7 @@ async fn render(url: &str) -> Result<(String, String)> {
         bail!("{url} resolves to a private or local address");
     }
     let profile = std::env::temp_dir().join(format!(
-        "mitten-chrome-{}-{}",
+        "mokuzu-chrome-{}-{}",
         std::process::id(),
         RENDERS.fetch_add(1, Ordering::Relaxed)
     ));

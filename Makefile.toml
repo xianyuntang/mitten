@@ -1,4 +1,4 @@
-# cargo-make configuration for mitten
+# cargo-make configuration for mokuzu
 # Install: cargo install cargo-make
 # Usage: cargo make <task>
 
@@ -97,27 +97,27 @@ cargo sweep --time "${1:-7}"
 [tasks.configure]
 description = "Interactive setup: API key, model, Discord"
 command = "cargo"
-args = ["run", "--package", "mitten", "--", "configure", "${@}"]
+args = ["run", "--package", "mokuzu", "--", "configure", "${@}"]
 
 # --- Run ---
 [tasks.chat]
 description = "Chat in the terminal"
 command = "cargo"
-args = ["run", "--package", "mitten", "--", "chat", "${@}"]
+args = ["run", "--package", "mokuzu", "--", "chat", "${@}"]
 
 [tasks.serve]
 description = "Run the Discord bot in the foreground"
 command = "cargo"
-args = ["run", "--package", "mitten", "--", "serve", "${@}"]
+args = ["run", "--package", "mokuzu", "--", "serve", "${@}"]
 
 # --- Service (launchd on macOS, systemd on Linux) ---
 [tasks."service:install"]
-description = "Install the mitten binary, then run `mitten serve` as a background service"
+description = "Install the mokuzu binary, then run `mokuzu serve` as a background service"
 script = '''
 #!/usr/bin/env bash
 set -euo pipefail
-cargo install --locked --path crates/mitten
-"$HOME/.cargo/bin/mitten" install "$@"
+cargo install --locked --path crates/mokuzu
+"$HOME/.cargo/bin/mokuzu" install "$@"
 '''
 
 [tasks."service:uninstall"]
@@ -125,7 +125,7 @@ description = "Remove the background service"
 script = '''
 #!/usr/bin/env bash
 set -euo pipefail
-"$HOME/.cargo/bin/mitten" uninstall
+"$HOME/.cargo/bin/mokuzu" uninstall
 '''
 
 [tasks."service:logs"]
@@ -133,8 +133,8 @@ description = "Follow the service log"
 script = '''
 #!/usr/bin/env bash
 if [ "$(uname)" = Darwin ]; then
-  tail -f "$HOME/Library/Logs/mitten.log"
+  tail -f "$HOME/Library/Logs/mokuzu.log"
 else
-  journalctl --user -u mitten -f
+  journalctl --user -u mokuzu -f
 fi
 '''

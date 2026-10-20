@@ -1,4 +1,4 @@
-//! `mitten chat`: a full-screen conversation with the agent.
+//! `mokuzu chat`: a full-screen conversation with the agent.
 
 use std::time::{Duration, Instant};
 
@@ -342,7 +342,7 @@ impl App {
 
         frame.render_widget(
             Line::from(vec![
-                " mitten ".black().on_cyan().bold(),
+                " mokuzu ".black().on_cyan().bold(),
                 Span::raw(" "),
                 Span::raw(self.model.as_str()).dark_gray(),
             ]),
@@ -393,7 +393,7 @@ impl App {
         // Keep the end of long input, where the cursor is, in view.
         let skip = rows.len() - usize::from(input_height);
         let lines: Vec<Line> = if self.input.is_empty() && self.busy.is_none() {
-            vec![Line::from("Ask Mitten anything...").dark_gray()]
+            vec![Line::from("Ask Mokuzu anything...").dark_gray()]
         } else {
             rows.into_iter().skip(skip).map(Line::from).collect()
         };
@@ -409,7 +409,7 @@ impl App {
         let mut lines = Vec::new();
         if self.entries.is_empty() {
             lines.push(Line::default());
-            lines.push(Line::from("Hi, I'm Mitten.").bold());
+            lines.push(Line::from("Hi, I'm Mokuzu.").bold());
             lines.push(
                 Line::from("Ask me to look into or change things on this machine.").dark_gray(),
             );
@@ -595,7 +595,7 @@ mod tests {
     #[test]
     fn approval_flows_from_prompt_to_result() {
         let mut app = App::new("opencode-go / m".to_owned(), "~/x".to_owned(), false);
-        assert!(screen(&mut app).contains("Hi, I'm Mitten."));
+        assert!(screen(&mut app).contains("Hi, I'm Mokuzu."));
 
         let (requests, mut inbox) = mpsc::unbounded_channel();
         app.input = "disk?".to_owned();

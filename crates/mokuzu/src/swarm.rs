@@ -157,7 +157,7 @@ pub const GUIDANCE: &str = "\
 # Swarm
 For large work that splits into many independent parts (broad research, comparing many products \
 or sources, checking a long list of items), you may call cast_crabs to send out a cast of crabs \
-(mitten is a mitten crab) that work on the parts in parallel. It is slow and costly, so use it \
+(mokuzu is モクズガニ, a mitten crab) that work on the parts in parallel. It is slow and costly, so use it \
 only when the parts are many and each needs its own searching and reading; answer quick \
 questions, and work where each step depends on the last, yourself. The user can also ask for it \
 by starting a message with /cast, or by name: when they ask for 螃蟹群, 蟹群, 集群模式, a cast of \
@@ -165,7 +165,7 @@ crabs, or swarm mode, call cast_crabs for that request.";
 
 /// Put before the request of a `/cast` turn, which asks for `cast_crabs` outright.
 pub const INSTRUCTION: &str = "\
-[Cast of crabs mode (螃蟹群; a group of crabs is a cast, and mitten is a mitten crab), started by the user with /cast.] \
+[Cast of crabs mode (螃蟹群; a group of crabs is a cast, and mokuzu is モクズガニ, a mitten crab), started by the user with /cast.] \
 Act as an orchestrator for the request below: split it into independent parts and call cast_crabs \
 with many subagents at once instead of doing the parts yourself. Scale the swarm to the job: up \
 to 10 subagents in one wave, and more waves when a broad survey needs more. Give each a role and one narrow, self-contained task with all the context it needs, since subagents see nothing but \

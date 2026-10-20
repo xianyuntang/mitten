@@ -1,27 +1,29 @@
 #!/bin/sh
-# Installs the mitten binary from GitHub releases.
+# Installs the mokuzu binary from GitHub releases.
 #
-#   curl -fsSL https://raw.githubusercontent.com/xianyuntang/mitten/main/install.sh | sh
+#   curl -fsSL https://raw.githubusercontent.com/xianyuntang/mokuzu/main/install.sh | sh
 #
 # Environment:
-#   MITTEN_VERSION       release tag to install, e.g. v0.1.0 (default: latest)
-#   MITTEN_INSTALL_DIR   where the binary goes (default: ~/.local/bin)
-#   MITTEN_DOWNLOAD_BASE base URL holding the release files (default: GitHub releases; for mirrors)
+#   MOKUZU_VERSION       release tag to install, e.g. v0.1.0 (default: latest)
+#   MOKUZU_INSTALL_DIR   where the binary goes (default: ~/.local/bin)
+#   MOKUZU_DOWNLOAD_BASE base URL holding the release files (default: GitHub releases; for mirrors)
+# The MITTEN_* names from before the project was renamed still work.
 set -eu
 
-repo="xianyuntang/mitten"
-version="${MITTEN_VERSION:-latest}"
-dir="${MITTEN_INSTALL_DIR:-$HOME/.local/bin}"
+repo="xianyuntang/mokuzu"
+version="${MOKUZU_VERSION:-${MITTEN_VERSION:-latest}}"
+dir="${MOKUZU_INSTALL_DIR:-${MITTEN_INSTALL_DIR:-$HOME/.local/bin}}"
+updating="${MOKUZU_UPDATING:-${MITTEN_UPDATING:-}}"
 
 fail() {
-    echo "mitten install: $*" >&2
+    echo "mokuzu install: $*" >&2
     exit 1
 }
 
 case "$(uname -s)" in
     Darwin) os=apple-darwin ;;
     Linux) os=unknown-linux-gnu ;;
-    *) fail "unsupported OS $(uname -s); build from source: cargo install --git https://github.com/$repo mitten" ;;
+    *) fail "unsupported OS $(uname -s); build from source: cargo install --git https://github.com/$repo mokuzu" ;;
 esac
 case "$(uname -m)" in
     arm64 | aarch64) arch=aarch64 ;;
@@ -34,8 +36,9 @@ if [ "$os" = apple-darwin ] && [ "$(sysctl -n hw.optional.arm64 2>/dev/null || e
 fi
 target="$arch-$os"
 
-if [ -n "${MITTEN_DOWNLOAD_BASE:-}" ]; then
-    base="$MITTEN_DOWNLOAD_BASE"
+download_base="${MOKUZU_DOWNLOAD_BASE:-${MITTEN_DOWNLOAD_BASE:-}}"
+if [ -n "$download_base" ]; then
+    base="$download_base"
 elif [ "$version" = latest ]; then
     base="https://github.com/$repo/releases/latest/download"
 else
@@ -66,7 +69,7 @@ fi
 
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
-archive="mitten-$target.tar.gz"
+archive="mokuzu-$target.tar.gz"
 
 echo "downloading $archive ($version)"
 fetch_big "$base/$archive" "$tmp/$archive" || fail "download failed: $base/$archive"
@@ -77,18 +80,24 @@ expected="$(awk -v f="$archive" '$2 == f { print $1 }' "$tmp/SHA256SUMS")"
 
 tar -xzf "$tmp/$archive" -C "$tmp"
 mkdir -p "$dir"
-cp "$tmp/mitten-$target/mitten" "$dir/mitten.tmp"
-chmod 755 "$dir/mitten.tmp"
-# Rename into place, so a running `mitten serve` keeps its old binary until restarted.
-mv -f "$dir/mitten.tmp" "$dir/mitten"
-echo "installed $("$dir/mitten" --version) to $dir/mitten"
+cp "$tmp/mokuzu-$target/mokuzu" "$dir/mokuzu.tmp"
+chmod 755 "$dir/mokuzu.tmp"
+# Rename into place, so a running `mokuzu serve` keeps its old binary until restarted.
+mv -f "$dir/mokuzu.tmp" "$dir/mokuzu"
+echo "installed $("$dir/mokuzu" --version) to $dir/mokuzu"
+# Installed before as mitten: the old name now runs mokuzu, which moves mitten's config, data,
+# and background service over on its first start.
+if [ -e "$dir/mitten" ] && [ ! -L "$dir/mitten" ]; then
+    ln -sf mokuzu "$dir/mitten"
+    echo "mitten is now mokuzu; \`mitten\` still works and runs mokuzu"
+fi
 
 case ":$PATH:" in
     *":$dir:"*) ;;
     *) echo "note: $dir is not on your PATH; add it in your shell profile, e.g.
     export PATH=\"$dir:\$PATH\"" ;;
 esac
-# `mitten update` sets this; the setup hints are for first installs.
-[ -n "${MITTEN_UPDATING:-}" ] || echo "next:
-  mitten configure   # set up the model, Discord, tools
-  mitten install     # run it in the background (reinstall after upgrading)"
+# `mokuzu update` sets this; the setup hints are for first installs.
+[ -n "$updating" ] || echo "next:
+  mokuzu configure   # set up the model, Discord, tools
+  mokuzu install     # run it in the background (reinstall after upgrading)"

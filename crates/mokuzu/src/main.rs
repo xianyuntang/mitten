@@ -8,6 +8,7 @@ mod discord;
 mod document;
 mod fetch;
 mod files;
+mod legacy;
 mod mcp;
 mod memory;
 mod onboarding;
@@ -26,12 +27,12 @@ use tracing_subscriber::EnvFilter;
 use tracing_subscriber::fmt::writer::BoxMakeWriter;
 
 const USAGE: &str =
-    "usage: mitten [chat|serve|configure|install|uninstall|update|restart] [--config PATH] [--version]
+    "usage: mokuzu [chat|serve|configure|install|uninstall|update|restart] [--config PATH] [--version]
 
   chat       talk in this terminal (default)
   configure  interactive setup: API key, model, Discord
   serve      run the Discord bot from [discord]
-  install    run `mitten serve` in the background and keep it alive (launchd or systemd)
+  install    run `mokuzu serve` in the background and keep it alive (launchd or systemd)
   uninstall  remove the background service
   update     install the latest release and restart the background service
   restart    restart the background service, e.g. after editing the config";
@@ -51,7 +52,7 @@ async fn main() -> Result<()> {
                 return Ok(());
             }
             Some("-V" | "--version") => {
-                println!("mitten {}", env!("CARGO_PKG_VERSION"));
+                println!("mokuzu {}", env!("CARGO_PKG_VERSION"));
                 return Ok(());
             }
             Some(
@@ -74,8 +75,9 @@ async fn main() -> Result<()> {
         Some(path) => std::path::absolute(path).context("failed to resolve --config path")?,
         None => std::env::home_dir()
             .context("cannot find home directory")?
-            .join(".config/mitten/config.toml"),
+            .join(".config/mokuzu/config.toml"),
     };
+    let config_path = legacy::migrate(config_path, command.as_deref() == Some("serve"))?;
 
     if command.as_deref() == Some("configure") {
         onboarding::run(&config_path).await?;
@@ -125,7 +127,7 @@ async fn main() -> Result<()> {
 
 async fn chat(config: config::Config) -> Result<()> {
     if !std::io::stdout().is_terminal() {
-        bail!("mitten chat needs an interactive terminal");
+        bail!("mokuzu chat needs an interactive terminal");
     }
     let db = db::Db::open(&config.database_path)?;
     let mcp = std::sync::Arc::new(mcp::Mcp::connect(&config.mcp).await);

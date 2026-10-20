@@ -89,7 +89,7 @@ struct File {
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct DatabaseSection {
-    /// Defaults to `~/.local/share/mitten/mitten.db`.
+    /// Defaults to `~/.local/share/mokuzu/mokuzu.db`.
     path: Option<PathBuf>,
 }
 
@@ -325,7 +325,7 @@ impl Default for LogSection {
     }
 }
 
-/// `[discord]`: lets `mitten serve` chat through a Discord bot, by DM and in any server channel.
+/// `[discord]`: lets `mokuzu serve` chat through a Discord bot, by DM and in any server channel.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DiscordSection {
@@ -426,7 +426,7 @@ pub struct Config {
     /// MCP servers by name.
     pub mcp: BTreeMap<String, McpServer>,
     pub approval: Approval,
-    /// `tracing` filter directive, e.g. `warn` or `mitten=debug`.
+    /// `tracing` filter directive, e.g. `warn` or `mokuzu=debug`.
     pub log_level: String,
     pub discord: Option<DiscordSection>,
     /// SQLite file holding conversation history.
@@ -440,7 +440,7 @@ pub struct Config {
 impl Config {
     pub fn load(path: &Path) -> Result<Self> {
         if !path.exists() {
-            bail!("no config at {}; run `mitten configure`", path.display());
+            bail!("no config at {}; run `mokuzu configure`", path.display());
         }
         let text = std::fs::read_to_string(path)
             .with_context(|| format!("failed to read config {}", path.display()))?;
@@ -465,7 +465,7 @@ impl Config {
             Some(path) => path,
             None => std::env::home_dir()
                 .context("cannot find home directory for the default database path")?
-                .join(".local/share/mitten/mitten.db"),
+                .join(".local/share/mokuzu/mokuzu.db"),
         };
         let base_url = file
             .opencode_go
@@ -648,7 +648,7 @@ mod tests {
         assert!(
             config
                 .database_path
-                .ends_with(".local/share/mitten/mitten.db")
+                .ends_with(".local/share/mokuzu/mokuzu.db")
         );
         assert!(!format!("{config:?}").contains("sk-secret"));
     }

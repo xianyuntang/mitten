@@ -1,4 +1,4 @@
-//! Installs `mitten serve` as a background service that starts on its own and restarts on exit:
+//! Installs `mokuzu serve` as a background service that starts on its own and restarts on exit:
 //! a launchd agent on macOS, a systemd user unit on Linux.
 
 use std::path::{Path, PathBuf};
@@ -6,19 +6,24 @@ use std::process::Command;
 
 use anyhow::{Context, Result, bail};
 
-const LABEL: &str = "dev.mitten.serve";
-const UNIT: &str = "mitten.service";
-const INSTALL_SCRIPT: &str = "https://raw.githubusercontent.com/xianyuntang/mitten/main/install.sh";
+const LABEL: &str = "dev.mokuzu.serve";
+const UNIT: &str = "mokuzu.service";
+/// The service's names before the project was renamed from mitten.
+const LEGACY_LABEL: &str = "dev.mitten.serve";
+const LEGACY_UNIT: &str = "mitten.service";
+const INSTALL_SCRIPT: &str = "https://raw.githubusercontent.com/xianyuntang/mokuzu/main/install.sh";
 
 pub fn install(config_path: &Path) -> Result<()> {
-    let exe = std::env::current_exe().context("failed to locate the mitten binary")?;
+    let exe = std::env::current_exe().context("failed to locate the mokuzu binary")?;
+    // Started through the old `mitten` name, a symlink, the service should still run `mokuzu`.
+    let exe = std::fs::canonicalize(&exe).unwrap_or(exe);
     let home = std::env::home_dir().context("cannot find home directory")?;
     if cfg!(target_os = "macos") {
         launchd_install(&exe, config_path, &home)
     } else if cfg!(target_os = "linux") {
         systemd_install(&exe, config_path, &home)
     } else {
-        bail!("`mitten install` supports macOS (launchd) and Linux (systemd)")
+        bail!("`mokuzu install` supports macOS (launchd) and Linux (systemd)")
     }
 }
 
@@ -29,24 +34,24 @@ pub fn uninstall() -> Result<()> {
     } else if cfg!(target_os = "linux") {
         systemd_uninstall(&home)
     } else {
-        bail!("`mitten uninstall` supports macOS (launchd) and Linux (systemd)")
+        bail!("`mokuzu uninstall` supports macOS (launchd) and Linux (systemd)")
     }
 }
 
 /// Reinstalls the latest release over this binary with install.sh, then restarts the background
 /// service if one is installed so it picks up the new binary.
 pub fn update() -> Result<()> {
-    let exe = std::env::current_exe().context("failed to locate the mitten binary")?;
+    let exe = std::env::current_exe().context("failed to locate the mokuzu binary")?;
     let dir = exe
         .parent()
-        .context("the mitten binary has no parent directory")?;
+        .context("the mokuzu binary has no parent directory")?;
     // Download first so a failed fetch fails here instead of piping nothing into sh.
     let script =
         format!("script=$(curl -fsSL {INSTALL_SCRIPT}) && printf '%s\\n' \"$script\" | sh");
     let status = Command::new("sh")
         .args(["-c", &script])
-        .env("MITTEN_INSTALL_DIR", dir)
-        .env("MITTEN_UPDATING", "1")
+        .env("MOKUZU_INSTALL_DIR", dir)
+        .env("MOKUZU_UPDATING", "1")
         .status()
         .context("failed to run sh")?;
     if !status.success() {
@@ -59,7 +64,7 @@ pub fn update() -> Result<()> {
 /// Restarts the background service, e.g. after editing the config by hand.
 pub fn restart() -> Result<()> {
     if !restart_installed()? {
-        bail!("no background service is installed; run `mitten install` first");
+        bail!("no background service is installed; run `mokuzu install` first");
     }
     Ok(())
 }
@@ -84,8 +89,48 @@ fn plist_path(home: &Path) -> PathBuf {
     home.join(format!("Library/LaunchAgents/{LABEL}.plist"))
 }
 
+fn legacy_plist_path(home: &Path) -> PathBuf {
+    home.join(format!("Library/LaunchAgents/{LEGACY_LABEL}.plist"))
+}
+
+/// Whether an install under the old name, mitten, set up a background service.
+pub fn legacy_installed(home: &Path) -> bool {
+    if cfg!(target_os = "macos") {
+        legacy_plist_path(home).exists()
+    } else {
+        cfg!(target_os = "linux") && unit_dir(home).join(LEGACY_UNIT).exists()
+    }
+}
+
+/// Removes mitten's background service, leaving it running until `stop_legacy`, since this
+/// process may be that service.
+pub fn remove_legacy(home: &Path) -> Result<()> {
+    if cfg!(target_os = "macos") {
+        let plist = legacy_plist_path(home);
+        std::fs::remove_file(&plist)
+            .with_context(|| format!("failed to remove {}", plist.display()))?;
+    } else if cfg!(target_os = "linux") {
+        let unit = unit_dir(home).join(LEGACY_UNIT);
+        systemctl(&["disable", LEGACY_UNIT])?;
+        std::fs::remove_file(&unit)
+            .with_context(|| format!("failed to remove {}", unit.display()))?;
+        systemctl(&["daemon-reload"])?;
+    }
+    Ok(())
+}
+
+/// Stops mitten's removed background service; ends this process if it is that service.
+/// Failure just means it wasn't running.
+pub fn stop_legacy() {
+    let _ = if cfg!(target_os = "macos") {
+        launchctl(&["remove", LEGACY_LABEL])
+    } else {
+        systemctl(&["stop", LEGACY_UNIT])
+    };
+}
+
 fn launchd_install(exe: &Path, config_path: &Path, home: &Path) -> Result<()> {
-    let log = home.join("Library/Logs/mitten.log");
+    let log = home.join("Library/Logs/mokuzu.log");
     let plist = plist_path(home);
 
     let path = service_path(home, std::env::var("PATH").ok().as_deref(), LAUNCHD_PATH);
@@ -122,10 +167,13 @@ fn launchctl(args: &[&str]) -> Result<()> {
 }
 
 fn unit_path(home: &Path) -> PathBuf {
+    unit_dir(home).join(UNIT)
+}
+
+fn unit_dir(home: &Path) -> PathBuf {
     std::env::var_os("XDG_CONFIG_HOME")
         .map_or_else(|| home.join(".config"), PathBuf::from)
         .join("systemd/user")
-        .join(UNIT)
 }
 
 fn systemd_install(exe: &Path, config_path: &Path, home: &Path) -> Result<()> {
@@ -144,12 +192,12 @@ fn systemd_install(exe: &Path, config_path: &Path, home: &Path) -> Result<()> {
     // Without lingering, user services stop at logout and do not start at boot.
     if run("loginctl", &["enable-linger"]).is_err() {
         println!(
-            "warning: could not enable lingering, so mitten stops when you log out.\n\
+            "warning: could not enable lingering, so mokuzu stops when you log out.\n\
              fix: sudo loginctl enable-linger $USER"
         );
     }
     println!(
-        "installed {}\nlogs: journalctl --user -u mitten -f",
+        "installed {}\nlogs: journalctl --user -u mokuzu -f",
         unit.display()
     );
     Ok(())
@@ -209,7 +257,7 @@ const SYSTEMD_PATH: &[&str] = &[
 /// The PATH the service runs with: the installing shell's PATH first, so node and npx
 /// resolve the same way as in the terminal (whatever manages them: asdf, nvm, Homebrew, …), then
 /// `fallback`. Relative entries are dropped, since the service's working directory differs.
-/// Like Hermes' gateway install, tools set up later need `mitten install` again.
+/// Like Hermes' gateway install, tools set up later need `mokuzu install` again.
 fn service_path(home: &Path, shell: Option<&str>, fallback: &[&str]) -> String {
     let fallback = fallback.iter().map(|dir| match dir.strip_prefix("~/") {
         Some(rest) => home.join(rest).to_string_lossy().into_owned(),
@@ -236,13 +284,13 @@ fn render_unit(exe: &Path, config: &Path, path: &str) -> String {
         .replace('%', "%%");
     format!(
         r#"[Unit]
-Description=Mitten agent (Discord)
+Description=Mokuzu agent (Discord)
 
 [Service]
 ExecStart={exe} serve --config {config}
 WorkingDirectory=~
-# PATH from the shell that ran `mitten install`, so MCP servers (npx, uvx) and the headless
-# Chrome lookup resolve as in the terminal. Run `mitten install` again after installing new tools.
+# PATH from the shell that ran `mokuzu install`, so MCP servers (npx, uvx) and the headless
+# Chrome lookup resolve as in the terminal. Run `mokuzu install` again after installing new tools.
 Environment="PATH={path}"
 Restart=always
 RestartSec=30
@@ -291,7 +339,7 @@ fn render_plist(exe: &Path, config: &Path, home: &Path, log: &Path, path: &str) 
     <key>WorkingDirectory</key><string>{home}</string>
     <key>EnvironmentVariables</key>
     <dict>
-        <!-- PATH from the shell that ran `mitten install`, so MCP servers (npx, uvx) and the
+        <!-- PATH from the shell that ran `mokuzu install`, so MCP servers (npx, uvx) and the
              headless Chrome lookup resolve as in the terminal. Reinstall after installing new tools. -->
         <key>PATH</key><string>{path}</string>
     </dict>
@@ -319,7 +367,7 @@ mod tests {
     #[test]
     fn plist_runs_serve_with_escaped_paths() {
         let plist = render_plist(
-            Path::new("/bin/mitten"),
+            Path::new("/bin/mokuzu"),
             Path::new("/cfg/a&b.toml"),
             Path::new("/home"),
             Path::new("/log"),
@@ -334,12 +382,12 @@ mod tests {
     #[test]
     fn unit_runs_serve_with_quoted_paths() {
         let unit = render_unit(
-            Path::new("/opt/my apps/mitten"),
+            Path::new("/opt/my apps/mokuzu"),
             Path::new("/cfg/100%$x.toml"),
             "/opt/100%/bin:/usr/bin",
         );
         assert!(
-            unit.contains(r#"ExecStart="/opt/my apps/mitten" serve --config "/cfg/100%%$$x.toml""#),
+            unit.contains(r#"ExecStart="/opt/my apps/mokuzu" serve --config "/cfg/100%%$$x.toml""#),
             "{unit}"
         );
         assert!(unit.contains("Restart=always"));
@@ -371,7 +419,7 @@ mod tests {
     fn plist_passes_plutil_lint() {
         use std::io::Write;
         let plist = render_plist(
-            Path::new("/bin/mitten"),
+            Path::new("/bin/mokuzu"),
             Path::new("/cfg.toml"),
             Path::new("/home"),
             Path::new("/log"),

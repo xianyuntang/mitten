@@ -16,7 +16,7 @@ pub fn tool() -> ToolDefinition {
     ToolDefinition {
         name: "settings".to_owned(),
         description: format!(
-            "Read or change Mitten's own settings in its config file. `get` lists the current \
+            "Read or change Mokuzu's own settings in its config file. `get` lists the current \
              values and known models. `set` changes one key after the user approves; a new model \
              is tested before it is saved. Changes apply to every conversation from the next \
              request. Editable keys: {}.",

@@ -86,7 +86,7 @@ impl Model {
         );
         // OpenCode Go asks clients to name themselves instead of sending a generic HTTP-library agent.
         let http = reqwest::Client::builder()
-            .user_agent(concat!("mitten/", env!("CARGO_PKG_VERSION")))
+            .user_agent(concat!("mokuzu/", env!("CARGO_PKG_VERSION")))
             .build()
             .context("failed to build HTTP client")?;
         let key = config.api_key.as_str();
@@ -250,7 +250,7 @@ impl std::fmt::Debug for Model {
 }
 
 const IDENTITY: &str = "\
-You are Mitten, a personal agent running on the user's machine. \
+You are Mokuzu, a personal agent running on the user's machine. \
 Be direct: match reply length to the ask. Finished work gets a short report of what changed, \
 what's verified, and what's left, never a replay of the process. No filler, no restating the request. \
 When unsure, say so plainly.
@@ -427,8 +427,8 @@ impl Agent {
         let system = system_prompt(&db, key, &config, None).await?;
         let search = config.search.clone().map(WebSearch::new).transpose()?;
         Ok(Self {
-            model: Model::new(&config, &format!("mitten-{}", conversation.id))?,
-            reviewer: Review::new(&config, &format!("mitten-{}-review", conversation.id))?,
+            model: Model::new(&config, &format!("mokuzu-{}", conversation.id))?,
+            reviewer: Review::new(&config, &format!("mokuzu-{}-review", conversation.id))?,
             config,
             db,
             conversation_id: conversation.id,
@@ -518,7 +518,7 @@ impl Agent {
         }
     }
 
-    /// Whether this conversation may schedule jobs: only Discord ones, since `mitten serve` runs
+    /// Whether this conversation may schedule jobs: only Discord ones, since `mokuzu serve` runs
     /// them and posts back there. Job runs themselves can't schedule more.
     fn schedules(&self) -> bool {
         self.key.starts_with("discord:")
@@ -667,20 +667,20 @@ impl Agent {
             || fresh.base_url != old.base_url
             || fresh.api_key.as_str() != old.api_key.as_str()
         {
-            self.model = Model::new(&fresh, &format!("mitten-{}", self.conversation_id))?;
+            self.model = Model::new(&fresh, &format!("mokuzu-{}", self.conversation_id))?;
         }
         let endpoint_changed =
             fresh.base_url != old.base_url || fresh.api_key.as_str() != old.api_key.as_str();
         if fresh.approval != old.approval || endpoint_changed {
             self.reviewer =
-                Review::new(&fresh, &format!("mitten-{}-review", self.conversation_id))?;
+                Review::new(&fresh, &format!("mokuzu-{}-review", self.conversation_id))?;
         }
         let search = self.config.search.take();
         self.config = Config { search, ..fresh };
         Ok(())
     }
 
-    /// Picks up config edits made elsewhere: another conversation, `mitten configure`, or by hand.
+    /// Picks up config edits made elsewhere: another conversation, `mokuzu configure`, or by hand.
     /// A file that no longer loads is logged and the current settings stay.
     fn reload(&mut self) -> Result<()> {
         match Config::load(&self.config.path) {
@@ -718,7 +718,7 @@ impl Agent {
             }
             Some(_) if self.search.is_none() => {
                 return io
-                    .say("/cast needs web search; set it up in `mitten configure`")
+                    .say("/cast needs web search; set it up in `mokuzu configure`")
                     .await;
             }
             Some(request) => {
@@ -968,7 +968,7 @@ impl Agent {
 
 /// A short title for a conversation that opens with `text`, in its language.
 pub async fn title(config: &Config, text: &str) -> Result<String> {
-    let model = Model::new(config, "mitten-title")?;
+    let model = Model::new(config, "mokuzu-title")?;
     let mut request = request(
         config,
         "Name the chat thread that opens with the user's message: a short title under 40 \
@@ -998,7 +998,7 @@ pub async fn title(config: &Config, text: &str) -> Result<String> {
 
 /// Sends one tiny request to check the key and model work; returns the model's reply.
 pub async fn ping(config: &Config) -> Result<String> {
-    let model = Model::new(config, "mitten-ping")?;
+    let model = Model::new(config, "mokuzu-ping")?;
     let messages = [Message::user("Reply with the single word OK.")];
     let response = model
         .complete(request(
@@ -1041,13 +1041,13 @@ mod tests {
         assert_eq!(completed_rounds_end(&messages, 2), 5);
     }
 
-    /// Calls the real model from `~/.config/mitten/config.toml`: `cargo test -- --ignored reviewer`.
+    /// Calls the real model from `~/.config/mokuzu/config.toml`: `cargo test -- --ignored reviewer`.
     #[tokio::test]
     #[ignore = "sends two requests to the configured model"]
     async fn reviewer_passes_reads_and_flags_deletes() {
         let path = std::env::home_dir()
             .expect("home")
-            .join(".config/mitten/config.toml");
+            .join(".config/mokuzu/config.toml");
         let loaded = Config::load(&path).expect("config loads");
         let config = Config {
             approval: crate::config::Approval::Auto {
@@ -1055,7 +1055,7 @@ mod tests {
             },
             ..loaded
         };
-        let reviewer = Review::new(&config, "mitten-review-test")
+        let reviewer = Review::new(&config, "mokuzu-review-test")
             .expect("builds")
             .expect("auto");
         let verdict = |request: &str, action: &str| {
@@ -1093,16 +1093,16 @@ mod tests {
     }
 
     /// Runs a turn that needs a tool call, then a follow-up, on the configured model or
-    /// `MITTEN_TEST_MODEL`: `MITTEN_TEST_MODEL=gpt-6-luna cargo test -- --ignored tool_round_trip`.
+    /// `MOKUZU_TEST_MODEL`: `MOKUZU_TEST_MODEL=gpt-6-luna cargo test -- --ignored tool_round_trip`.
     #[tokio::test]
     #[ignore = "sends several requests to the configured model"]
     async fn tool_round_trip_on_the_real_model() {
         let path = std::env::home_dir()
             .expect("home")
-            .join(".config/mitten/config.toml");
+            .join(".config/mokuzu/config.toml");
         let loaded = Config::load(&path).expect("config loads");
-        let model = std::env::var("MITTEN_TEST_MODEL").unwrap_or(loaded.model.clone());
-        let dir = std::env::temp_dir().join(format!("mitten-test-{}", std::process::id()));
+        let model = std::env::var("MOKUZU_TEST_MODEL").unwrap_or(loaded.model.clone());
+        let dir = std::env::temp_dir().join(format!("mokuzu-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("temp dir");
         let file = dir.join("note.txt");
         std::fs::write(&file, "the secret word is pelican").expect("write");

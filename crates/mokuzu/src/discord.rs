@@ -37,8 +37,8 @@ const MAX_MESSAGE_CHARS: usize = 1_900;
 const RECEIVED: char = '👀';
 const DONE: char = '✅';
 const FAILED: char = '❌';
-const RUN: &str = "mitten:run";
-const DENY: &str = "mitten:deny";
+const RUN: &str = "mokuzu:run";
+const DENY: &str = "mokuzu:deny";
 /// Longest status line kept; statuses are one-line summaries.
 const MAX_STATUS_CHARS: usize = 200;
 /// How often the scheduler looks for due jobs.
@@ -75,7 +75,7 @@ enum Input {
 /// Connects to Discord and serves DMs until the connection fails.
 pub async fn serve(config: Config) -> Result<()> {
     let Some(discord) = config.discord.clone() else {
-        bail!("`mitten serve` needs a [discord] section in the config");
+        bail!("`mokuzu serve` needs a [discord] section in the config");
     };
     let db = Db::open(&config.database_path)?;
     // MESSAGE_CONTENT is privileged: enable it for the bot in the Developer Portal, or connecting fails.
@@ -100,7 +100,7 @@ pub async fn serve(config: Config) -> Result<()> {
     client.start().await.context("Discord connection failed")
 }
 
-/// Starts every due job, forever. A job missed while mitten was down runs once on startup.
+/// Starts every due job, forever. A job missed while mokuzu was down runs once on startup.
 async fn run_scheduler(config: Config, db: Db, mcp: Arc<Mcp>, http: Arc<Http>) {
     let mut tick = tokio::time::interval(CRON_TICK);
     loop {
@@ -315,7 +315,7 @@ impl EventHandler for Handler {
 
     async fn ready(&self, _ctx: Context, ready: Ready) {
         let _ = self.bot.set(ready.user.id);
-        // Printed, not logged, so `mitten serve` shows it at the default log level.
+        // Printed, not logged, so `mokuzu serve` shows it at the default log level.
         eprintln!("connected to Discord as {}", ready.user.name);
     }
 
@@ -398,7 +398,7 @@ fn thread_name(content: &str) -> String {
         name.push('…');
     }
     if name.is_empty() {
-        name.push_str("mitten");
+        name.push_str("mokuzu");
     }
     name
 }
@@ -968,7 +968,7 @@ mod tests {
     #[test]
     fn thread_name_uses_first_line_within_limit() {
         assert_eq!(thread_name("\n  check disk  \nmore"), "check disk");
-        assert_eq!(thread_name("   "), "mitten");
+        assert_eq!(thread_name("   "), "mokuzu");
         let long = thread_name(&"磁".repeat(200));
         assert_eq!(long.chars().count(), MAX_THREAD_NAME_CHARS + 1);
         assert!(long.ends_with('…'));

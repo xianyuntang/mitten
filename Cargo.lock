@@ -2062,7 +2062,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "mitten"
+name = "mokuzu"
 version = "0.4.5"
 dependencies = [
  "anyhow",

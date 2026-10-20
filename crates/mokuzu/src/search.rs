@@ -92,7 +92,7 @@ impl WebSearch {
     pub fn new(search: Search) -> Result<Self> {
         let client = reqwest::Client::builder()
             .timeout(TIMEOUT)
-            .user_agent(concat!("mitten/", env!("CARGO_PKG_VERSION")))
+            .user_agent(concat!("mokuzu/", env!("CARGO_PKG_VERSION")))
             .build()
             .context("failed to build HTTP client")?;
         Ok(Self {

@@ -32,7 +32,7 @@ jobs:
       - name: Tag matches Cargo.toml version
         if: startsWith(github.ref, 'refs/tags/')
         run: |
-          version=$(sed -n 's/^version = "\(.*\)"/\1/p' crates/mitten/Cargo.toml | head -1)
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' crates/mokuzu/Cargo.toml | head -1)
           if [ "v$version" != "$GITHUB_REF_NAME" ]; then
             echo "tag $GITHUB_REF_NAME does not match Cargo.toml version $version" >&2
             exit 1
@@ -46,15 +46,15 @@ jobs:
       - run: cargo build --release --locked --target ${{ matrix.target }}
       - name: Package
         run: |
-          name=mitten-${{ matrix.target }}
+          name=mokuzu-${{ matrix.target }}
           mkdir "$name"
-          cp target/${{ matrix.target }}/release/mitten LICENSE-MIT LICENSE-APACHE config.example.toml "$name/"
+          cp target/${{ matrix.target }}/release/mokuzu LICENSE-MIT LICENSE-APACHE config.example.toml "$name/"
           tar -czf "$name.tar.gz" "$name"
           shasum -a 256 "$name.tar.gz" > "$name.tar.gz.sha256"
       - uses: actions/upload-artifact@v4
         with:
-          name: mitten-${{ matrix.target }}
-          path: mitten-${{ matrix.target }}.tar.gz*
+          name: mokuzu-${{ matrix.target }}
+          path: mokuzu-${{ matrix.target }}.tar.gz*
 
   release:
     needs: build

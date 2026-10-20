@@ -1,5 +1,5 @@
 //! Read-only file tools: `read_file`, `list_dir`, and `send_file`. They run without approval, so they refuse
-//! hidden paths (any component starting with `.`, like `~/.ssh` or `.env`) and Mitten's own config
+//! hidden paths (any component starting with `.`, like `~/.ssh` or `.env`) and Mokuzu's own config
 //! and database, which hold API keys, tokens, and every conversation.
 
 use std::path::{Component, Path, PathBuf};
@@ -210,7 +210,7 @@ async fn resolve(config: &Config, path: &Value) -> Result<PathBuf> {
         if let Ok(secret) = tokio::fs::canonicalize(secret).await
             && secret == path
         {
-            bail!("{} is Mitten's own config or database", path.display());
+            bail!("{} is Mokuzu's own config or database", path.display());
         }
     }
     Ok(path)
@@ -266,7 +266,7 @@ mod tests {
 
     #[tokio::test]
     async fn tools_refuse_hidden_and_own_files_and_page_long_ones() {
-        let dir = std::env::temp_dir().join(format!("mitten-files-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("mokuzu-files-{}", std::process::id()));
         std::fs::create_dir_all(dir.join("sub")).expect("create dirs");
         std::fs::write(dir.join("long.txt"), "é".repeat(MAX_CHARS + 5)).expect("write");
         std::fs::write(dir.join("config.toml"), "secret").expect("write");

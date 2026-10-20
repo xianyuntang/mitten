@@ -371,7 +371,7 @@ trailer << /Root 1 0 R >>
 
     #[tokio::test]
     async fn view_pdf_shows_requested_pages_from_a_file() {
-        let path = std::env::temp_dir().join(format!("mitten-view-{}.pdf", std::process::id()));
+        let path = std::env::temp_dir().join(format!("mokuzu-view-{}.pdf", std::process::id()));
         std::fs::write(&path, PDF).expect("write");
         let config = Config::parse("[opencode-go]\napi_key = \"k\"\n").expect("valid");
         let fetcher = Fetcher::new().expect("fetcher");

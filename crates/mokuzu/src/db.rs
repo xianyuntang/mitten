@@ -411,7 +411,7 @@ fn migrate(conn: &mut Connection) -> Result<()> {
     let applied = usize::try_from(applied).context("negative user_version")?;
     if applied > MIGRATIONS.len() {
         bail!(
-            "database is at migration {applied}, newer than this binary ({}); upgrade mitten",
+            "database is at migration {applied}, newer than this binary ({}); upgrade mokuzu",
             MIGRATIONS.len()
         );
     }

@@ -1,22 +1,22 @@
 ---
 name: config-coder
-description: Rules for changing mitten's config file format. Use whenever you add, rename, remove, or change a key in config.toml (crates/mitten/src/config.rs), so the `mitten configure` TUI (crates/mitten/src/onboarding.rs) and the docs change in the same commit.
+description: Rules for changing mokuzu's config file format. Use whenever you add, rename, remove, or change a key in config.toml (crates/mokuzu/src/config.rs), so the `mokuzu configure` TUI (crates/mokuzu/src/onboarding.rs) and the docs change in the same commit.
 ---
 
 # Config Coder
 
-Every config key a user may set must be settable from `mitten configure`.
+Every config key a user may set must be settable from `mokuzu configure`.
 A config change is not done until the TUI, docs, and tests match it.
 
 ## Checklist
 
 Change all of these in the same commit:
 
-1. **`crates/mitten/src/config.rs`**
+1. **`crates/mokuzu/src/config.rs`**
    - Raw `File*` struct field (serde, `deny_unknown_fields`).
    - Resolved `Config` field, with default and validation in `Config::parse`.
    - A test in `config.rs` tests for parsing and for rejecting bad values.
-2. **`crates/mitten/src/onboarding.rs` (the TUI)**
+2. **`crates/mokuzu/src/onboarding.rs` (the TUI)**
    - Field index const. Keep `MCP_FIRST` last and bump it; MCP Keep/Remove rows start there.
    - `fields.push(field(step, label, kind, value))` in `Form::new`, prefilled from `current`
      (the loaded `Config`), else the same default `config.rs` uses.
@@ -30,7 +30,7 @@ Change all of these in the same commit:
    - Update `rendered_config_parses_back` and `steps_validate_and_hide_conditional_fields`.
 3. **`config.example.toml`**: commented entry with what it does and its default.
 4. **`README.md`**: update where the key's behavior is described, if anywhere.
-5. **`crates/mitten/src/settings.rs`** (agent's `settings` tool): add the key to `KEYS`
+5. **`crates/mokuzu/src/settings.rs`** (agent's `settings` tool): add the key to `KEYS`
    only if the model should be able to change it. Never add secrets.
 
 ## Keys the form doesn't show
@@ -38,13 +38,13 @@ Change all of these in the same commit:
 Avoid them. If a key truly doesn't belong on the form (rarely touched, like
 `tools.searxng.results`), keep its value across saves: store it on `Form` (see
 `search_results`, `claude_extra`) and write it back in `render_toml`. Otherwise
-`mitten configure` silently resets a hand-edited value.
+`mokuzu configure` silently resets a hand-edited value.
 
 ## Verify
 
 ```sh
-cargo clippy -p mitten --all-targets
-cargo test -p mitten
+cargo clippy -p mokuzu --all-targets
+cargo test -p mokuzu
 ```
 
-Then run `mitten configure` against a copy of a real config, save, and diff the file.
+Then run `mokuzu configure` against a copy of a real config, save, and diff the file.

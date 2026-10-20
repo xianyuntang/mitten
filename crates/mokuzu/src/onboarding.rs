@@ -1,4 +1,4 @@
-//! `mitten configure`: a step-by-step, full-screen setup with dropdowns.
+//! `mokuzu configure`: a step-by-step, full-screen setup with dropdowns.
 
 use std::path::{Path, PathBuf};
 
@@ -782,7 +782,7 @@ impl Form {
 
         frame.render_widget(
             Line::from(vec![
-                " mitten ".black().on_cyan().bold(),
+                " mokuzu ".black().on_cyan().bold(),
                 "configure".bold(),
             ]),
             header,
@@ -999,9 +999,9 @@ const FOCUS_BG: Color = Color::Indexed(236);
 fn help(i: usize) -> (&'static str, &'static str) {
     let about = match i {
         KEY => "Your OpenCode Go API key. ^R shows it.",
-        MODEL => "The model Mitten talks with. Pick Custom… to type another model ID.",
+        MODEL => "The model Mokuzu talks with. Pick Custom… to type another model ID.",
         CUSTOM_MODEL => "An OpenCode Go model ID.",
-        DISCORD => "Lets `mitten serve` chat through a Discord bot, by DM and in server channels.",
+        DISCORD => "Lets `mokuzu serve` chat through a Discord bot, by DM and in server channels.",
         TOKEN => {
             "Bot token from the Discord Developer Portal › Bot. Turn on Message Content Intent \
              there too, or the bot cannot connect."
@@ -1023,7 +1023,7 @@ fn help(i: usize) -> (&'static str, &'static str) {
             "Basic auth for SearXNG, if it needs it. Give both or neither."
         }
         BRAVE_KEY => "Your Brave Search API key.",
-        LOG => "How much `mitten serve` logs.",
+        LOG => "How much `mokuzu serve` logs.",
         DATABASE => "SQLite file that holds conversations and memory.",
         MCP_ADD => {
             "Connect an MCP server, a local command or a remote URL. Its tools reach the model \
@@ -1042,7 +1042,7 @@ fn help(i: usize) -> (&'static str, &'static str) {
         }
         REVIEWER => "The model that reviews actions when approval is Auto.",
         TIMEZONE => "IANA name like Asia/Taipei, for message times and scheduled jobs.",
-        0 => "Where Mitten's model runs. Only OpenCode Go for now.",
+        0 => "Where Mokuzu's model runs. Only OpenCode Go for now.",
         _ => "Keep it, or Remove it.",
     };
     let warning = match i {
@@ -1119,7 +1119,7 @@ fn parse_user_ids(text: &str) -> std::result::Result<Vec<u64>, String> {
 fn default_database_path() -> Result<PathBuf> {
     Ok(std::env::home_dir()
         .context("cannot find home directory")?
-        .join(".local/share/mitten/mitten.db"))
+        .join(".local/share/mokuzu/mokuzu.db"))
 }
 
 enum SearchAnswers {
@@ -1189,7 +1189,7 @@ fn quote(text: &str) -> String {
 
 fn render_toml(answers: &Answers) -> String {
     let mut text =
-        "# Written by `mitten configure`; run it again to change these settings.\n".to_owned();
+        "# Written by `mokuzu configure`; run it again to change these settings.\n".to_owned();
     if let Some(zone) = &answers.timezone {
         text.push_str(&format!("\ntimezone = {}\n", quote(zone)));
     }

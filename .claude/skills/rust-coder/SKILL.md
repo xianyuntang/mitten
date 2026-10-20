@@ -1,6 +1,6 @@
 ---
 name: rust-coder
-description: Rust coding guide for this repo. Use when writing or reviewing Rust code in crates/ (mitten). Covers Rust API Guidelines plus project rules for anyhow, Tokio, tracing, and Clippy.
+description: Rust coding guide for this repo. Use when writing or reviewing Rust code in crates/ (mokuzu). Covers Rust API Guidelines plus project rules for anyhow, Tokio, tracing, and Clippy.
 ---
 
 # Rust Coder - Convention Guide
@@ -37,8 +37,8 @@ value.expect("must exist");
 | Types/traits      | `UpperCamelCase`       | `MessageHandler`, `DeviceId`       | Official |
 | Functions/vars    | `snake_case`           | `handle_message()`, `device_count` | Official |
 | Constants/statics | `SCREAMING_SNAKE_CASE` | `MAX_RETRY_COUNT`                  | Official |
-| Cargo crate name  | `kebab-case`           | `mitten-core`                      | Official |
-| Rust module path  | `snake_case`           | `mitten_core`                      | Official |
+| Cargo crate name  | `kebab-case`           | `mokuzu-core`                      | Official |
+| Rust module path  | `snake_case`           | `mokuzu_core`                      | Official |
 
 ### Key Rules
 

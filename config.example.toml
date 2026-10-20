@@ -1,10 +1,10 @@
-# Mitten config. Easiest: run `mitten configure`, which writes ~/.config/mitten/config.toml for you.
-# Or copy this file there, or pass a path: `mitten --config path/to/config.toml`.
+# Mokuzu config. Easiest: run `mokuzu configure`, which writes ~/.config/mokuzu/config.toml for you.
+# Or copy this file there, or pass a path: `mokuzu --config path/to/config.toml`.
 
 # Optional. Your IANA time zone, for the time stamped on each message and scheduled jobs. Defaults
-# to this machine's (`TZ`, else the system setting); set it when Mitten runs somewhere else, like a
+# to this machine's (`TZ`, else the system setting); set it when Mokuzu runs somewhere else, like a
 # UTC server.
-# `mitten configure` sets it under Advanced.
+# `mokuzu configure` sets it under Advanced.
 # timezone = "Asia/Taipei"
 
 [model]
@@ -64,14 +64,14 @@ api_key = "your-opencode-api-key"
 # model = "glm-5.3-flash"
 
 [log]
-# tracing filter, e.g. "warn", "info", "mitten=debug".
+# tracing filter, e.g. "warn", "info", "mokuzu=debug".
 level = "warn"
 
 # Optional. Conversation history (SQLite); send /new to start over.
 # [database]
-# path = "/Users/you/.local/share/mitten/mitten.db"
+# path = "/Users/you/.local/share/mokuzu/mokuzu.db"
 
-# Optional. Needed for `mitten serve`: chat with Mitten by DM to your Discord bot.
+# Optional. Needed for `mokuzu serve`: chat with Mokuzu by DM to your Discord bot.
 # [discord]
 # token = "your-bot-token"
 # # Only these Discord user IDs can talk to the bot (it can read files on this machine).

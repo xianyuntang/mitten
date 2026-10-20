@@ -1,5 +1,5 @@
 //! Scheduled jobs: a prompt that runs on its own at set times, each run in a fresh conversation,
-//! and posts its result where the job was made. Only `mitten serve` runs jobs, so only Discord
+//! and posts its result where the job was made. Only `mokuzu serve` runs jobs, so only Discord
 //! conversations get the tool.
 
 use chrono::{DateTime, NaiveDateTime, TimeZone as _};
