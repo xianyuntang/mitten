@@ -759,16 +759,25 @@ impl Agent {
         result
     }
 
-    /// Summarizes older turns once history (plus `prompt`) passes the configured budget, keeping
-    /// recent whole turns verbatim. A failed summary is reported and the turn goes ahead uncompacted.
+    /// Once history (plus `prompt`) passes the configured budget, clears long tool output in
+    /// older turns, then summarizes those turns if that wasn't enough, keeping recent whole turns
+    /// verbatim. A failed summary is reported and the turn goes ahead uncompacted.
     async fn compact_if_needed(&mut self, prompt: &str, io: &mut impl Io) -> Result<()> {
         let budget = self.config.compact_at_tokens;
-        if compact::estimate_tokens(&self.messages) + prompt.chars().count() / 3 <= budget {
+        let fits = |messages: &[Message]| {
+            compact::estimate_tokens(messages) + prompt.chars().count() / 3 <= budget
+        };
+        if fits(&self.messages) {
             return Ok(());
         }
         let cut = compact::split_point(&self.messages, budget / 4);
         if cut == 0 {
             return Ok(());
+        }
+        // Tool output is most of a long history, and clearing it needs no model call.
+        if compact::prune(&mut self.messages[..cut]) && fits(&self.messages) {
+            io.note("🗜️ cleared old tool output").await?;
+            return self.save_all().await;
         }
         io.note("🗜️ compacting earlier conversation…").await?;
         let mut request = request(
@@ -801,16 +810,21 @@ impl Agent {
         }
         let mut compacted = compact::summary_messages(&summary).to_vec();
         compacted.extend(self.messages.drain(cut..));
-        let rows = compacted
+        self.messages = compacted;
+        self.save_all().await
+    }
+
+    /// Replaces the saved conversation with `self.messages`.
+    async fn save_all(&self) -> Result<()> {
+        let rows = self
+            .messages
             .iter()
             .map(serde_json::to_value)
             .collect::<Result<Vec<Value>, _>>()?;
         self.db
             .rewrite(self.conversation_id, rows)
             .await
-            .context("failed to save the compacted conversation")?;
-        self.messages = compacted;
-        Ok(())
+            .context("failed to save the compacted conversation")
     }
 
     /// Forgets the conversation, in memory and on disk.

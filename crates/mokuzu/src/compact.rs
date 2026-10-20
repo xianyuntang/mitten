@@ -1,4 +1,5 @@
-//! Conversation compaction: when history grows past a token budget, older turns are replaced by a
+//! Conversation compaction: when history grows past a token budget, long tool output and images in
+//! older turns are cleared first, and if that isn't enough, older turns are replaced by a
 //! model-written summary so requests stay within the model's context window.
 
 use rig_core::message::{
@@ -18,6 +19,10 @@ concise bullet points under short headings, in under 1500 words. Output only the
 const SUMMARY_HEADER: &str = "[Summary of the earlier conversation, written when it was compacted]";
 /// Tool output characters kept per result in the transcript sent for summarizing.
 const MAX_TOOL_OUTPUT_CHARS: usize = 2_000;
+/// Older tool output longer than this is cleared before summarizing.
+const PRUNE_ABOVE_CHARS: usize = 200;
+const CLEARED_OUTPUT: &str = "[old tool output cleared to save context]";
+const CLEARED_IMAGE: &str = "[old image cleared to save context]";
 
 /// Rough cost of one image; providers bill by pixels, not by the size of its base64 data.
 const IMAGE_TOKENS: usize = 1_500;
@@ -62,6 +67,38 @@ pub fn split_point(messages: &[Message], keep_tokens: usize) -> usize {
         .filter(|&i| starts_turn(&messages[i]))
         .find(|&i| estimate_tokens(&messages[i..]) <= keep_tokens)
         .unwrap_or(messages.len())
+}
+
+/// Clears long tool output and images in `messages`, the older turns, leaving short results and
+/// all text the user and model wrote. True if anything was cleared.
+pub fn prune(messages: &mut [Message]) -> bool {
+    let mut cleared = false;
+    for message in messages {
+        let Message::User { content } = message else {
+            continue;
+        };
+        for part in content.iter_mut() {
+            match part {
+                UserContent::ToolResult(result) => {
+                    let chars: usize = result
+                        .content
+                        .iter()
+                        .map(|c| c.as_text().map_or(usize::MAX, |t| t.chars().count()))
+                        .fold(0, usize::saturating_add);
+                    if chars > PRUNE_ABOVE_CHARS {
+                        result.content = vec![ToolResultContent::text(CLEARED_OUTPUT)];
+                        cleared = true;
+                    }
+                }
+                UserContent::Image(_) => {
+                    *part = UserContent::text(CLEARED_IMAGE);
+                    cleared = true;
+                }
+                _ => {}
+            }
+        }
+    }
+    cleared
 }
 
 /// Plain-text rendering of `messages` for the summarizer, with long tool output cut.
@@ -149,6 +186,30 @@ mod tests {
         assert_eq!(split_point(&messages, recent), 2);
         assert_eq!(split_point(&messages, estimate_tokens(&messages)), 0);
         assert_eq!(split_point(&messages, 1), messages.len());
+    }
+
+    #[test]
+    fn prune_clears_only_long_tool_output_and_images() {
+        let result = |text: &str| {
+            UserContent::tool_result("1", "web_search", vec![ToolResultContent::text(text)])
+        };
+        let mut messages = vec![
+            Message::user("keep me"),
+            Message::User {
+                content: vec![result("short"), result(&"x".repeat(PRUNE_ABOVE_CHARS + 1))],
+            },
+            Message::User {
+                content: vec![UserContent::Image(rig_core::message::Image::default())],
+            },
+        ];
+        assert!(prune(&mut messages));
+        let text = transcript(&messages);
+        assert!(text.contains("keep me") && text.contains("short"), "{text}");
+        assert!(
+            text.contains(CLEARED_OUTPUT) && !text.contains("xxx"),
+            "{text}"
+        );
+        assert!(!prune(&mut messages), "nothing left to clear");
     }
 
     #[test]

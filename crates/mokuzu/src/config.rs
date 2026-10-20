@@ -9,7 +9,7 @@ use serde::Deserialize;
 const DEFAULT_BASE_URL: &str = "https://opencode.ai/zen/go/v1";
 const DEFAULT_MODEL: &str = "minimax-m3";
 const DEFAULT_MAX_TOKENS: u32 = 16_000;
-const DEFAULT_COMPACT_AT_TOKENS: usize = 100_000;
+const DEFAULT_COMPACT_AT_TOKENS: usize = 200_000;
 
 /// Which OpenCode Go endpoint format a model speaks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -637,7 +637,7 @@ mod tests {
         .expect("valid");
         assert_eq!(config.model, "minimax-m3");
         assert_eq!(config.max_tokens, 16_000);
-        assert_eq!(config.compact_at_tokens, 100_000);
+        assert_eq!(config.compact_at_tokens, 200_000);
         assert_eq!(config.base_url, "http://localhost:8080/v1");
         assert_eq!(Api::for_model("glm-5.3"), Api::Openai);
         assert_eq!(Api::for_model("claude-haiku-5-5"), Api::Anthropic);
