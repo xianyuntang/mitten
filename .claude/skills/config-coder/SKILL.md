@@ -36,8 +36,9 @@ Change all of these in the same commit:
 ## Keys the form doesn't show
 
 Avoid them. If a key truly doesn't belong on the form (rarely touched, like
-`tools.searxng.results`), keep its value across saves: store it on `Form` (see
-`search_results`, `claude_extra`) and write it back in `render_toml`. Otherwise
+`tools.searxng.results`), keep its value across saves: add it to `HIDDEN` in onboarding.rs,
+which copies it from the old file as written, or store it on `Form` (see `search_results`) and
+write it back in `render_toml`. Otherwise
 `mokuzu configure` silently resets a hand-edited value.
 
 ## Verify

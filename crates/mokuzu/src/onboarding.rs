@@ -555,7 +555,8 @@ impl Form {
             }
         };
         let old = std::fs::read_to_string(path).ok();
-        let text = merge_mcp(&render_toml(&answers), old.as_deref(), &remove, add);
+        let text = keep_hidden(&render_toml(&answers), old.as_deref());
+        let text = merge_mcp(&text, old.as_deref(), &remove, add);
         let config = Config::parse(&text).context("form produced an invalid config")?;
 
         config::write(path, &text)?;
@@ -1182,6 +1183,33 @@ fn merge_mcp(
     new.to_string()
 }
 
+/// Keys the form doesn't show, as `(table, key)`.
+const HIDDEN: &[(&str, &str)] = &[
+    ("model", "api"),
+    ("model", "max_tokens"),
+    ("model", "compact_at_tokens"),
+    ("opencode-go", "base_url"),
+];
+
+/// `text` with the `HIDDEN` keys set in the `old` config file carried over as written, so saving
+/// doesn't reset a hand-edited value.
+fn keep_hidden(text: &str, old: Option<&str>) -> String {
+    let (Ok(mut new), Some(Ok(old))) = (
+        text.parse::<DocumentMut>(),
+        old.map(str::parse::<DocumentMut>),
+    ) else {
+        return text.to_owned();
+    };
+    for (table, key) in HIDDEN {
+        if let Some(value) = old.get(table).and_then(|t| t.get(key))
+            && let Some(table) = new.get_mut(table).and_then(Item::as_table_mut)
+        {
+            table.insert(key, value.clone());
+        }
+    }
+    new.to_string()
+}
+
 /// Quotes and escapes a TOML string.
 fn quote(text: &str) -> String {
     toml::Value::String(text.to_owned()).to_string()
@@ -1295,6 +1323,22 @@ mod tests {
         assert_eq!(gh.env["MODE"].as_str(), "ro");
         form.fields[MCP_ENV].value = "oops".to_owned();
         assert!(form.mcp().is_err());
+    }
+
+    #[test]
+    fn keep_hidden_carries_over_keys_the_form_lacks() {
+        let new = "[model]\nname = \"glm-5.3\"\n\n[opencode-go]\napi_key = \"k\"\n";
+        let old = "[model]\nname = \"old\"\nmax_tokens = 8000\ncompact_at_tokens = 50000\n\n\
+                   [opencode-go]\napi_key = \"old\"\nbase_url = \"https://proxy.example/v1\"\n";
+        let config = Config::parse(&keep_hidden(new, Some(old))).expect("valid");
+        assert_eq!(config.model, "glm-5.3");
+        assert_eq!(config.api_key.as_str(), "k");
+        assert_eq!(
+            (config.max_tokens, config.compact_at_tokens),
+            (8000, 50_000)
+        );
+        assert_eq!(config.base_url, "https://proxy.example/v1");
+        assert_eq!(keep_hidden(new, None), new);
     }
 
     #[test]
