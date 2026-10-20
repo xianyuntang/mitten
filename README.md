@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/icon.png" alt="mokuzu" width="200">
+</p>
+
 # mokuzu
 
 A personal agent that runs on your machine. Chat with it in the terminal or over Discord. It
