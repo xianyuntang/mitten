@@ -70,6 +70,8 @@ enum Input {
     },
     /// A Run or Deny click on the approval message `message`.
     Decision { message: MessageId, run: bool },
+    /// A server message the bot skips, added to the history as context only. `who` wrote `text`.
+    Overheard { who: String, text: String },
 }
 
 /// Connects to Discord and serves DMs until the connection fails.
@@ -165,6 +167,7 @@ async fn run_job(config: Config, db: Db, mcp: Arc<Mcp>, http: Arc<Http>, job: Jo
         approval: None,
         status: None,
         board: None,
+        overheard: Vec::new(),
     };
     let run = async {
         io.note(&format!("⏰ job #{} {}", job.id, job.name)).await?;
@@ -230,6 +233,32 @@ impl Handler {
         }
     }
 
+    /// Hands a skipped server message to its channel's history, if the bot has a conversation
+    /// there, so a later turn knows what was said. Other channels are left alone.
+    async fn overhear(&self, ctx: &Context, msg: Message) {
+        let text = msg.content.trim();
+        if msg.guild_id.is_none() || text.is_empty() {
+            return;
+        }
+        match self
+            .db
+            .has_conversation(&format!("discord:{}", msg.channel_id))
+            .await
+        {
+            Ok(true) => {}
+            Ok(false) => return,
+            Err(err) => {
+                tracing::warn!("failed to look up conversation: {err:#}");
+                return;
+            }
+        }
+        let input = Input::Overheard {
+            who: msg.author.display_name().to_owned(),
+            text: text.to_owned(),
+        };
+        self.deliver(&ctx.http, msg.channel_id, input);
+    }
+
     async fn on_click(&self, ctx: &Context, click: &ComponentInteraction) -> Result<()> {
         let run = match click.data.custom_id.as_str() {
             RUN => true,
@@ -276,13 +305,16 @@ impl EventHandler for Handler {
     async fn message(&self, ctx: Context, msg: Message) {
         let guild = msg.guild_id.map(|g| g.get());
         let author = msg.author.id.get();
-        if msg.author.bot || !self.discord.can_talk(guild, author) {
+        if msg.author.bot {
             return;
         }
         let Some(&bot) = self.bot.get() else {
             return;
         };
-        if self.discord.mention_only(guild) && !msg.mentions_user_id(bot) {
+        if !self.discord.can_talk(guild, author)
+            || (self.discord.mention_only(guild) && !msg.mentions_user_id(bot))
+        {
+            self.overhear(&ctx, msg).await;
             return;
         }
         let content = strip_mention(&msg.content, bot);
@@ -428,6 +460,7 @@ async fn run_channel(
         approval: None,
         status: None,
         board: None,
+        overheard: Vec::new(),
     };
     // A `/new` that ended a merged burst, handled next on its own.
     let mut next = None;
@@ -439,16 +472,22 @@ async fn run_channel(
                 None => break,
             },
         };
-        let Input::Text {
-            mut content,
-            mut attachments,
-            origin,
-            message,
-            author,
-            ..
-        } = input
-        else {
-            continue; // A click on an approval that already timed out.
+        let (mut content, mut attachments, origin, message, author) = match input {
+            Input::Text {
+                content,
+                attachments,
+                origin,
+                message,
+                author,
+                ..
+            } => (content, attachments, origin, message, author),
+            Input::Overheard { who, text } => {
+                if let Err(err) = agent.overhear(&who, &text).await {
+                    tracing::warn!("{err:#}");
+                }
+                continue;
+            }
+            Input::Decision { .. } => continue, // A click on an approval that already timed out.
         };
         let mut messages = vec![(origin, message)];
         if content.trim() != "/new" {
@@ -489,6 +528,12 @@ async fn run_channel(
             Err(err) => Err(err),
         };
         drop(typing);
+        // Chat overheard while the turn waited for approval goes in after it.
+        for (who, text) in std::mem::take(&mut io.overheard) {
+            if let Err(err) = agent.overhear(&who, &text).await {
+                tracing::warn!("{err:#}");
+            }
+        }
         if let Err(err) = &result {
             tracing::warn!("turn failed: {err:#}");
             if let Err(err) = io.say(&format!("error: {err:#}")).await {
@@ -502,7 +547,7 @@ async fn run_channel(
 /// Folds text messages into one prompt until `inbox` stays quiet for `MERGE_QUIET` or `MERGE_CAP`
 /// passes, so a burst,
 /// or messages sent while a turn ran, is answered once. Stops at a `/new` or at a message from
-/// someone other than `author`, which is returned to run after this prompt.
+/// someone other than `author` or at overheard chat, which is returned to handle after this prompt.
 async fn merge_waiting(
     inbox: &mut mpsc::UnboundedReceiver<Input>,
     author: u64,
@@ -525,6 +570,9 @@ async fn merge_waiting(
             can_approve,
         } = input
         else {
+            if matches!(input, Input::Overheard { .. }) {
+                return Some(input);
+            }
             continue;
         };
         // Each turn has one sender, so it loads one person's memory.
@@ -557,6 +605,8 @@ struct DiscordIo {
     status: Option<(MessageId, String)>,
     /// The live board message, edited in place until the board is let go.
     board: Option<MessageId>,
+    /// Chat overheard while a turn waits for approval, as `(who, text)`, added once it ends.
+    overheard: Vec<(String, String)>,
 }
 
 impl DiscordIo {
@@ -690,6 +740,7 @@ impl Io for DiscordIo {
                 // The click handler already updated the message.
                 Ok(Some(Input::Decision { message: id, run })) if id == message => break run,
                 Ok(Some(Input::Decision { .. })) => {}
+                Ok(Some(Input::Overheard { who, text })) => self.overheard.push((who, text)),
                 // Someone who may not approve can't answer either; their message is dropped.
                 Ok(Some(Input::Text {
                     origin,

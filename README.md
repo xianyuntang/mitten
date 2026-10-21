@@ -84,7 +84,9 @@ How it behaves:
   Other servers and DMs use the main list. In a server open to everyone, only the main list can
   approve actions, but anyone there can make the bot read files on this machine, so open a server
   only if you trust everyone in it. With `mention_only`, messages in the bot's threads need a
-  mention too. To copy a server ID, right-click the server with Developer Mode on.
+  mention too. Messages it skips in its threads, from anyone, are still saved to that thread's
+  conversation, marked as overheard chat to use as context and never as instructions. To copy a
+  server ID, right-click the server with Developer Mode on.
 - A message in a server channel opens a thread, and each thread is its own conversation.
   Idle threads archive after an hour.
 - Each person has their own memory, shared by all of their threads and DMs; the terminal has one

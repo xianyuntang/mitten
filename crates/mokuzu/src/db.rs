@@ -205,6 +205,19 @@ impl Db {
         .await
     }
 
+    /// Whether a conversation for `key` was ever started.
+    pub async fn has_conversation(&self, key: &str) -> Result<bool> {
+        let key = key.to_owned();
+        self.with_conn(move |conn| {
+            Ok(conn.query_row(
+                "SELECT EXISTS (SELECT 1 FROM conversations WHERE key = ?1)",
+                params![key],
+                |row| row.get(0),
+            )?)
+        })
+        .await
+    }
+
     pub async fn messages(&self, conversation_id: i64) -> Result<Vec<Message>> {
         self.with_conn(move |conn| {
             let mut stmt = conn.prepare(
