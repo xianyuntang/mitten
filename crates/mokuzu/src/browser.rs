@@ -453,10 +453,13 @@ fn launch_config(profile: &Path, virtual_display: Option<&str>) -> Result<Browse
         .disable_default_args()
         // No startup tab: on Linux Chromium, chromiumoxide never sees a load finish in the tab
         // Chrome opens itself, so navigating it hangs. Mokuzu opens its own tabs.
+        // A basic password store keeps the cookie key in the profile: under a desktop session
+        // whose keyring stays locked (auto-login), Chrome holds every request waiting for it.
         .args([
             "no-first-run",
             "no-default-browser-check",
             "no-startup-window",
+            "password-store=basic",
         ])
         .hide()
         .viewport(None)
