@@ -178,19 +178,22 @@ async fn stream(page: &Page, write: &mut OwnedWriteHalf) -> Result<()> {
     let mut frames = page.event_listener::<EventScreencastFrame>().await?;
     let start = StartScreencastParams::builder()
         .format(StartScreencastFormat::Jpeg)
-        .quality(70)
-        .max_width(SCREEN.0)
-        .max_height(SCREEN.1)
+        // Smaller frames: on a Pi without a GPU, encoding them is most of each frame's cost.
+        .quality(50)
+        .max_width(SCREEN.0 * 3 / 4)
+        .max_height(SCREEN.1 * 3 / 4)
         .build();
     page.execute(start).await?;
     let streamed = async {
         while let Some(event) = frames.next().await {
+            // Acked on arrival, so Chrome renders the next frame while this one is sent. A slow
+            // viewer still holds Chrome back: the next frame is not read, so not acked, until
+            // this one is written.
+            page.execute(ScreencastFrameAckParams::new(event.session_id))
+                .await?;
             let jpeg = base64::engine::general_purpose::STANDARD
                 .decode(AsRef::<str>::as_ref(&event.data))?;
             frame(write, &jpeg).await?;
-            // Acked once sent, so Chrome waits for a slow viewer instead of piling frames up.
-            page.execute(ScreencastFrameAckParams::new(event.session_id))
-                .await?;
         }
         Ok(())
     }
