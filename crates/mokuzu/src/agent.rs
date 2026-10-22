@@ -16,6 +16,7 @@ use rig_core::message::{
 use rig_core::providers::{anthropic, gemini, openai};
 use serde_json::Value;
 
+use crate::browser;
 use crate::compact;
 use crate::config::{Api, Config};
 use crate::cron;
@@ -391,6 +392,7 @@ pub(crate) fn request(
             memory::tool(),
             skill::tool(),
             fetch::tool(),
+            browser::tool(),
             settings::tool(),
         ]
         .into_iter()
@@ -985,6 +987,12 @@ impl Agent {
                         }
                         let (output, pages) = self.fetcher.run(args).await;
                         images.extend(pages.into_iter().map(UserContent::Image));
+                        output
+                    }
+                    "browser" => {
+                        let (output, shots) =
+                            browser::run(&self.config, &call.function.arguments, io).await;
+                        images.extend(shots.into_iter().map(UserContent::Image));
                         output
                     }
                     "web_search" if self.search.is_some() => {

@@ -56,8 +56,9 @@ pub fn tool() -> ToolDefinition {
              article. Returns up to {MAX_CHARS} characters; for longer pages, call again with the \
              `offset` it gives you. Set `render` to load it in a headless browser so JavaScript runs. \
              It is slower, so start without it, but when a plain fetch fails (e.g. HTTP 403), comes \
-             back empty or nearly so, or asks for JavaScript, retry once with `render` before giving \
-             up on the page. Private and local network addresses are refused."
+             back empty or nearly so, or asks for JavaScript, retry once with `render`. If that fails \
+             too, or the page needs a sign-in, open it with `browser` if you have it, \
+             instead of giving up. Private and local network addresses are refused."
         ),
         parameters: json!({
             "type": "object",
