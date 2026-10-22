@@ -35,6 +35,8 @@ if [ "$os" = apple-darwin ] && [ "$(sysctl -n hw.optional.arm64 2>/dev/null || e
     arch=aarch64
 fi
 target="$arch-$os"
+[ "$target" = aarch64-unknown-linux-gnu ] ||
+    fail "no prebuilt binary for $target; build from source: cargo install --git https://github.com/$repo mokuzu"
 
 download_base="${MOKUZU_DOWNLOAD_BASE:-${MITTEN_DOWNLOAD_BASE:-}}"
 if [ -n "$download_base" ]; then

@@ -16,7 +16,8 @@ or a click in the browser) asks you first, or goes past a reviewer model in auto
 
 ## Install
 
-macOS (Apple silicon or Intel) and Linux (x86_64 or arm64, glibc 2.35 or newer):
+Linux on arm64 (glibc 2.35 or newer), e.g. a Raspberry Pi. Elsewhere, build from source with
+`cargo install --git https://github.com/xianyuntang/mokuzu mokuzu`.
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/xianyuntang/mokuzu/main/install.sh | sh
