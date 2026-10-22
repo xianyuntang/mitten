@@ -1086,12 +1086,17 @@ mod tests {
             .expect("viewer tabs");
         let tabs = tabs.text().await.expect("body");
         assert!(tabs.contains(&format!(r#""id":{tab}"#)), "{tabs}");
-        let frame = client
-            .get(format!("{}&tab={tab}", link.replace("/?", "/shot?")))
+        let mut stream = client
+            .get(format!("{}&tab={tab}", link.replace("/?", "/stream?")))
             .send()
             .await
-            .expect("viewer frame");
-        assert_eq!(frame.headers()["content-type"], "image/jpeg");
+            .expect("viewer stream");
+        let first = stream.chunk().await.expect("chunk").expect("a frame");
+        assert!(
+            String::from_utf8_lossy(&first).contains("image/jpeg"),
+            "no frame in {first:?}"
+        );
+        drop(stream);
         let clicked = client
             .post(format!("{}&tab={tab}", link.replace("/?", "/input?")))
             .body(r#"{"kind": "click", "x": 0.5, "y": 0.5}"#)

@@ -7,18 +7,27 @@ use std::collections::HashMap;
 use std::net::{IpAddr, UdpSocket};
 
 use anyhow::{Context, Result, anyhow, bail};
+use base64::Engine as _;
 use chromiumoxide::cdp::browser_protocol::input::{
     DispatchKeyEventType, DispatchMouseEventType, InsertTextParams,
 };
+use chromiumoxide::cdp::browser_protocol::page::{
+    EventScreencastFrame, ScreencastFrameAckParams, StartScreencastFormat, StartScreencastParams,
+    StopScreencastParams,
+};
 use chromiumoxide::page::Page;
+use futures::StreamExt;
 use reqwest::Url;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+use tokio::net::tcp::OwnedWriteHalf;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::OnceCell;
 
-use super::{LOAD_LIMIT, REQUEST_TIMEOUT, SESSION, evaluate, key_event, mouse, random, send_key};
+use super::{
+    LOAD_LIMIT, REQUEST_TIMEOUT, SCREEN, SESSION, evaluate, key_event, mouse, random, send_key,
+};
 
 /// Largest request body taken, enough for a pasted paragraph.
 const MAX_BODY: usize = 64 * 1024;
@@ -70,8 +79,8 @@ fn lan_ip() -> Option<IpAddr> {
 }
 
 /// Answers one HTTP/1.1 request, then closes the connection.
-async fn serve(stream: TcpStream, token: &str) -> Result<()> {
-    let (read, mut write) = stream.into_split();
+async fn serve(connection: TcpStream, token: &str) -> Result<()> {
+    let (read, mut write) = connection.into_split();
     let mut reader = BufReader::new(read);
     let mut line = String::new();
     reader.read_line(&mut line).await?;
@@ -103,6 +112,9 @@ async fn serve(stream: TcpStream, token: &str) -> Result<()> {
         .get("token")
         .is_some_and(|given| same(given.as_bytes(), token.as_bytes()));
     let tab = query.get("tab").and_then(|tab| tab.parse().ok());
+    if allowed && method == "GET" && url.path() == "/stream" {
+        return stream(&page(tab)?, &mut write).await;
+    }
     let (status, kind, content) = if allowed {
         match respond(method, url.path(), tab, &body).await {
             Ok(Some(reply)) => reply,
@@ -141,7 +153,6 @@ async fn respond(method: &str, path: &str, tab: Option<u32>, body: &[u8]) -> Res
             "application/json",
             tabs().await.to_string().into_bytes(),
         ),
-        ("GET", "/shot") => (ok, "image/jpeg", super::shot(&page(tab)?).await?),
         ("POST", "/input") => {
             let input: Input = serde_json::from_slice(body).context("bad input")?;
             apply(&page(tab)?, input).await?;
@@ -149,6 +160,54 @@ async fn respond(method: &str, path: &str, tab: Option<u32>, body: &[u8]) -> Res
         }
         _ => return Ok(None),
     }))
+}
+
+/// Streams `page` as MJPEG until the viewer goes. Chrome pushes a frame whenever the page
+/// repaints, so the picture follows input without polling.
+// ponytail: one screencast per tab; a second viewer on the same tab stops the first one's
+// when it leaves. Track viewers per tab if two people ever watch at once.
+async fn stream(page: &Page, write: &mut OwnedWriteHalf) -> Result<()> {
+    write
+        .write_all(
+            b"HTTP/1.1 200 OK\r\ncontent-type: multipart/x-mixed-replace; boundary=frame\r\n\
+              cache-control: no-store\r\nconnection: close\r\n\r\n",
+        )
+        .await?;
+    // The page as it is now: Chrome sends nothing until it next repaints.
+    frame(write, &super::shot(page).await?).await?;
+    let mut frames = page.event_listener::<EventScreencastFrame>().await?;
+    let start = StartScreencastParams::builder()
+        .format(StartScreencastFormat::Jpeg)
+        .quality(70)
+        .max_width(SCREEN.0)
+        .max_height(SCREEN.1)
+        .build();
+    page.execute(start).await?;
+    let streamed = async {
+        while let Some(event) = frames.next().await {
+            let jpeg = base64::engine::general_purpose::STANDARD
+                .decode(AsRef::<str>::as_ref(&event.data))?;
+            frame(write, &jpeg).await?;
+            // Acked once sent, so Chrome waits for a slow viewer instead of piling frames up.
+            page.execute(ScreencastFrameAckParams::new(event.session_id))
+                .await?;
+        }
+        Ok(())
+    }
+    .await;
+    let _ = page.execute(StopScreencastParams::default()).await;
+    streamed
+}
+
+async fn frame(write: &mut OwnedWriteHalf, jpeg: &[u8]) -> Result<()> {
+    let head = format!(
+        "--frame\r\ncontent-type: image/jpeg\r\ncontent-length: {}\r\n\r\n",
+        jpeg.len()
+    );
+    write.write_all(head.as_bytes()).await?;
+    write.write_all(jpeg).await?;
+    write.write_all(b"\r\n").await?;
+    Ok(())
 }
 
 /// Constant-time comparison, so response timing gives the token away a byte at a time.
@@ -314,10 +373,12 @@ const sleep = ms => new Promise(done => setTimeout(done, ms));
 
 async function tabs() {
   const list = await (await fetch(api('/tabs'))).json();
+  const shown = tab;
   if (!list.some(t => t.id === tab)) tab = list.at(-1)?.id ?? null;
+  if (tab !== shown) show();
   $('tab').replaceChildren(...list.map(t => new Option(`${t.id}: ${t.title || 'untitled'}`, t.id, false, t.id === tab)));
 }
-$('tab').onchange = () => tab = Number($('tab').value);
+$('tab').onchange = () => { tab = Number($('tab').value); show(); };
 
 async function send(input) {
   if (tab == null) return;
@@ -325,18 +386,12 @@ async function send(input) {
   if (!reply.ok) status(await reply.text());
 }
 
-async function frames() {
-  for (;;) {
-    try {
-      if (tab == null) { await tabs(); if (tab == null) { status('No tab open yet.'); await sleep(1000); continue; } }
-      const reply = await fetch(api('/shot', tab));
-      if (!reply.ok) { tab = null; continue; }
-      const url = URL.createObjectURL(await reply.blob());
-      await new Promise(done => { $('screen').onload = done; $('screen').src = url; });
-      URL.revokeObjectURL(url);
-    } catch { status('Lost the connection to mokuzu; retrying.'); await sleep(1000); }
-  }
+// Chrome pushes a frame on every repaint over one long response the browser shows as it comes.
+function show() {
+  if (tab == null) { status('No tab open yet.'); $('screen').removeAttribute('src'); return; }
+  $('screen').src = api('/stream', tab);
 }
+$('screen').onerror = () => setTimeout(() => tabs().then(show).catch(() => {}), 1000);
 
 const at = e => { const r = $('screen').getBoundingClientRect(); return { x: (e.clientX - r.left) / r.width, y: (e.clientY - r.top) / r.height }; };
 $('screen').addEventListener('click', e => { $('screen').focus(); send({ kind: 'click', ...at(e) }); });
@@ -358,7 +413,7 @@ $('url').addEventListener('keydown', e => {
 });
 $('back').onclick = () => send({ kind: 'back' });
 setInterval(() => tabs().catch(() => {}), 3000);
-frames();
+tabs().catch(() => status('Cannot reach mokuzu.'));
 </script>
 </html>
 "#;
