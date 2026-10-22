@@ -59,7 +59,6 @@ pub async fn run(agent: Agent) -> Result<()> {
 /// What the screen asks the agent task to do.
 enum Request {
     Prompt(String),
-    Reset,
 }
 
 /// What the agent task reports back to the screen.
@@ -83,7 +82,6 @@ async fn serve(
     while let Some(request) = requests.recv().await {
         let result = match request {
             Request::Prompt(prompt) => agent.run_turn(&prompt, Vec::new(), None, &mut io).await,
-            Request::Reset => agent.reset().await,
         };
         let done = Update::Done(result.map_err(|err| format!("{err:#}")));
         if updates.send(done).is_err() {
@@ -164,7 +162,7 @@ impl App {
         let mut entries = Vec::new();
         if resumed {
             entries.push(Entry::Notice(
-                "Resumed the earlier conversation. /new starts fresh.".to_owned(),
+                "Resumed the earlier conversation.".to_owned(),
             ));
         }
         Self {
@@ -252,12 +250,6 @@ impl App {
         let request = match prompt.as_str() {
             "" => return false,
             "/exit" | "/quit" => return true,
-            "/new" => {
-                self.entries.clear();
-                self.entries
-                    .push(Entry::Notice("Started a new conversation.".to_owned()));
-                Request::Reset
-            }
             _ => {
                 self.entries.push(Entry::User(prompt.clone()));
                 Request::Prompt(prompt)
@@ -380,7 +372,7 @@ impl App {
             (Color::Cyan, String::new())
         };
         let mut hints =
-            "enter send · alt+enter newline · /new · /cast · /browser · ↑↓ pgup pgdn scroll · ctrl+c quit "
+            "enter send · alt+enter newline · /cast · /browser · ↑↓ pgup pgdn scroll · ctrl+c quit "
                 .to_owned();
         if self.scroll > 0 {
             hints = format!("↓ {} more lines · {hints}", self.scroll);

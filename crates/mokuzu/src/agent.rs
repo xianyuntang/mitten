@@ -451,13 +451,20 @@ impl Agent {
     /// Resumes the stored conversation named `key` (e.g. `terminal`, `discord:<channel>`).
     pub async fn new(config: Config, db: Db, mcp: Arc<Mcp>, key: &str) -> Result<Self> {
         let conversation = db.conversation(key).await?;
-        let messages = db
+        let messages = match db
             .messages(conversation.id)
             .await?
             .into_iter()
             .map(|row| serde_json::from_value(row.content))
             .collect::<Result<Vec<Message>, _>>()
-            .context("stored conversation is unreadable; send /new to start over")?;
+        {
+            Ok(messages) => messages,
+            Err(err) => {
+                tracing::warn!("stored conversation {key} is unreadable, starting over: {err}");
+                db.clear(conversation.id).await?;
+                Vec::new()
+            }
+        };
         let system = system_prompt(&db, key, &config, None).await?;
         let search = config.search.clone().map(WebSearch::new).transpose()?;
         Ok(Self {

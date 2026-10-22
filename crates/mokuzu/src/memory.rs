@@ -1,6 +1,5 @@
 //! Long-term memory: short facts the agent saves itself, one set per person (each Discord user, and
-//! the terminal), shared by all of that person's conversations and loaded before every turn, so it
-//! survives `/new`.
+//! the terminal), shared by all of that person's conversations and loaded before every turn.
 
 use serde_json::{Value, json};
 
@@ -16,8 +15,8 @@ pub const CHAR_LIMIT: usize = 5_000;
 pub const GUIDANCE: &str = "\
 # Memory
 You have long-term memory about the person sending the current message, shared by all of their \
-conversations; each person has their own, and others never see it. It survives /new and is \
-reloaded before every message. \
+conversations; each person has their own, and others never see it. It is reloaded before \
+every message. \
 Save with the memory tool facts that matter from now on: who you are talking to, their \
 preferences, names or roles they give you, stable facts about this machine, standing conventions. \
 When the user asks you to remember something, or tells you such a fact, call the memory tool in \
@@ -69,7 +68,7 @@ pub fn history_tool() -> ToolDefinition {
     ToolDefinition {
         name: "search_history".to_owned(),
         description: "Search the earlier messages of this conversation that are no longer in your \
-                      context: those before a /new, and those replaced by a summary. Use it when the \
+                      context because a summary replaced them. Use it when the \
                       user refers to something from before that you cannot see. Finds messages \
                       containing every word of `query` (any language, ASCII case ignored), newest \
                       first. Covers what the user and you wrote, not tool output."

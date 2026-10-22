@@ -10,11 +10,12 @@ use std::time::Duration;
 use anyhow::{Context as _, Result, bail};
 use rig_core::message::{Image, ImageMediaType, MimeType as _};
 use serenity::all::{
-    Attachment, AutoArchiveDuration, ButtonStyle, ChannelId, ChannelType, Client,
-    ComponentInteraction, Context, CreateActionRow, CreateAllowedMentions, CreateAttachment,
-    CreateButton, CreateInteractionResponse, CreateInteractionResponseMessage, CreateMessage,
-    CreateThread, EditMessage, EditThread, EventHandler, GatewayIntents, Http, Interaction,
-    Message, MessageId, Ready, UserId,
+    Attachment, AutoArchiveDuration, ButtonStyle, ChannelId, ChannelType, Client, Command,
+    CommandInteraction, CommandOptionType, ComponentInteraction, Context, CreateActionRow,
+    CreateAllowedMentions, CreateAttachment, CreateButton, CreateCommand, CreateCommandOption,
+    CreateInteractionResponse, CreateInteractionResponseMessage, CreateMessage, CreateThread,
+    EditMessage, EditThread, EventHandler, GatewayIntents, Http, Interaction, Message, MessageId,
+    Ready, UserId,
 };
 use serenity::async_trait;
 use tokio::sync::mpsc;
@@ -259,6 +260,73 @@ impl Handler {
         self.deliver(&ctx.http, msg.channel_id, input);
     }
 
+    /// Starts a turn for `content`: acknowledges `msg`, opens a thread on it in a server text
+    /// channel, and hands the prompt to that conversation.
+    async fn accept(
+        &self,
+        ctx: &Context,
+        msg: &Message,
+        content: String,
+        attachments: Vec<Attachment>,
+        author: u64,
+    ) {
+        // Acknowledge right away so the user knows the bot has it before the model answers.
+        if let Err(err) = msg.react(&ctx.http, RECEIVED).await {
+            tracing::warn!("failed to react to message: {err:#}");
+        }
+        let channel = match route(ctx, msg, &content, &self.config).await {
+            Ok(channel) => channel,
+            Err(err) => {
+                tracing::warn!("failed to open a thread, answering in place: {err:#}");
+                msg.channel_id
+            }
+        };
+        let input = Input::Text {
+            content,
+            attachments,
+            origin: msg.channel_id,
+            message: msg.id,
+            author,
+            can_approve: self
+                .discord
+                .can_approve(msg.guild_id.map(|g| g.get()), author),
+        };
+        self.deliver(&ctx.http, channel, input);
+    }
+
+    /// A slash command picked from Discord's list: the bot answers it with the command as text,
+    /// then treats that reply like the user's own message.
+    async fn on_command(&self, ctx: &Context, command: &CommandInteraction) -> Result<()> {
+        let author = command.user.id.get();
+        if !self
+            .discord
+            .can_talk(command.guild_id.map(|g| g.get()), author)
+        {
+            let reply = CreateInteractionResponseMessage::new()
+                .content("You are not allowed to talk to this bot.")
+                .ephemeral(true);
+            return Ok(command
+                .create_response(&ctx.http, CreateInteractionResponse::Message(reply))
+                .await?);
+        }
+        let mut content = format!("/{}", command.data.name);
+        for option in &command.data.options {
+            if let Some(text) = option.value.as_str() {
+                content.push(' ');
+                content.push_str(text);
+            }
+        }
+        let reply = CreateInteractionResponseMessage::new()
+            .content(&content)
+            .allowed_mentions(CreateAllowedMentions::new());
+        command
+            .create_response(&ctx.http, CreateInteractionResponse::Message(reply))
+            .await?;
+        let msg = command.get_response(&ctx.http).await?;
+        self.accept(ctx, &msg, content, Vec::new(), author).await;
+        Ok(())
+    }
+
     async fn on_click(&self, ctx: &Context, click: &ComponentInteraction) -> Result<()> {
         let run = match click.data.custom_id.as_str() {
             RUN => true,
@@ -318,44 +386,48 @@ impl EventHandler for Handler {
             return;
         }
         let content = strip_mention(&msg.content, bot);
-        // Acknowledge right away so the user knows the bot has it before the model answers.
-        if let Err(err) = msg.react(&ctx.http, RECEIVED).await {
-            tracing::warn!("failed to react to message: {err:#}");
-        }
-        let channel = match route(&ctx, &msg, &content, &self.config).await {
-            Ok(channel) => channel,
-            Err(err) => {
-                tracing::warn!("failed to open a thread, answering in place: {err:#}");
-                msg.channel_id
-            }
-        };
         let attachments = msg
             .attachments
-            .into_iter()
+            .iter()
             .filter(|a| image_type(a).is_some() || is_text(a) || is_document(a))
+            .cloned()
             .collect();
-        let input = Input::Text {
-            content,
-            attachments,
-            origin: msg.channel_id,
-            message: msg.id,
-            author,
-            can_approve: self.discord.can_approve(guild, author),
-        };
-        self.deliver(&ctx.http, channel, input);
+        self.accept(&ctx, &msg, content, attachments, author).await;
     }
 
-    async fn ready(&self, _ctx: Context, ready: Ready) {
+    async fn ready(&self, ctx: Context, ready: Ready) {
         let _ = self.bot.set(ready.user.id);
+        // Listed so Discord suggests them when the user types `/`; typing them as text still works.
+        let commands = vec![
+            CreateCommand::new("cast")
+                .description("Send out a cast of crabs: many agents researching at once")
+                .add_option(
+                    CreateCommandOption::new(
+                        CommandOptionType::String,
+                        "request",
+                        "What to research",
+                    )
+                    .required(true),
+                ),
+            CreateCommand::new("browser").description(
+                "Get a link to a live view of mokuzu's browser, to click and type in it",
+            ),
+        ];
+        if let Err(err) = Command::set_global_commands(&ctx.http, commands).await {
+            tracing::warn!("failed to register slash commands: {err:#}");
+        }
         // Printed, not logged, so `mokuzu serve` shows it at the default log level.
         eprintln!("connected to Discord as {}", ready.user.name);
     }
 
     async fn interaction_create(&self, ctx: Context, interaction: Interaction) {
-        if let Interaction::Component(click) = interaction
-            && let Err(err) = self.on_click(&ctx, &click).await
-        {
-            tracing::warn!("failed to handle button click: {err:#}");
+        let result = match interaction {
+            Interaction::Component(click) => self.on_click(&ctx, &click).await,
+            Interaction::Command(command) => self.on_command(&ctx, &command).await,
+            _ => Ok(()),
+        };
+        if let Err(err) = result {
+            tracing::warn!("failed to handle interaction: {err:#}");
         }
     }
 }
@@ -462,7 +534,7 @@ async fn run_channel(
         board: None,
         overheard: Vec::new(),
     };
-    // A `/new` that ended a merged burst, handled next on its own.
+    // Input that ended a merged burst, handled next on its own.
     let mut next = None;
     loop {
         let input = match next.take() {
@@ -490,30 +562,17 @@ async fn run_channel(
             Input::Decision { .. } => continue, // A click on an approval that already timed out.
         };
         let mut messages = vec![(origin, message)];
-        if content.trim() != "/new" {
-            next = merge_waiting(
-                &mut io.inbox,
-                author,
-                &mut content,
-                &mut attachments,
-                &mut messages,
-            )
-            .await;
-        }
+        next = merge_waiting(
+            &mut io.inbox,
+            author,
+            &mut content,
+            &mut attachments,
+            &mut messages,
+        )
+        .await;
         let prompt = content.trim();
         if prompt.is_empty() && attachments.is_empty() {
             io.finish_all(&messages, true).await;
-            continue;
-        }
-        if prompt == "/new" {
-            let (reply, ok) = match agent.reset().await {
-                Ok(()) => ("Started a new conversation.".to_owned(), true),
-                Err(err) => (format!("error: {err:#}"), false),
-            };
-            if let Err(err) = io.say(&reply).await {
-                tracing::error!("failed to reply: {err:#}");
-            }
-            io.finish_all(&messages, ok).await;
             continue;
         }
         io.status = None;
@@ -546,8 +605,8 @@ async fn run_channel(
 
 /// Folds text messages into one prompt until `inbox` stays quiet for `MERGE_QUIET` or `MERGE_CAP`
 /// passes, so a burst,
-/// or messages sent while a turn ran, is answered once. Stops at a `/new` or at a message from
-/// someone other than `author` or at overheard chat, which is returned to handle after this prompt.
+/// or messages sent while a turn ran, is answered once. Stops at a message from someone other
+/// than `author` or at overheard chat, which is returned to handle after this prompt.
 async fn merge_waiting(
     inbox: &mut mpsc::UnboundedReceiver<Input>,
     author: u64,
@@ -576,7 +635,7 @@ async fn merge_waiting(
             continue;
         };
         // Each turn has one sender, so it loads one person's memory.
-        if more.trim() == "/new" || sender != author {
+        if sender != author {
             return Some(Input::Text {
                 content: more,
                 attachments: more_attachments,
@@ -944,8 +1003,6 @@ mod tests {
                 run: true,
             },
             text("c", 3),
-            text(" /new ", 4),
-            text("d", 5),
         ] {
             tx.send(input).unwrap();
         }
@@ -956,8 +1013,7 @@ mod tests {
         let next = merge_waiting(&mut rx, 7, &mut content, &mut attachments, &mut messages).await;
         assert_eq!(content, "a\nb\nc");
         assert_eq!(messages.len(), 3);
-        assert!(matches!(next, Some(Input::Text { message, .. }) if message == MessageId::new(4)));
-        assert!(matches!(rx.try_recv(), Ok(Input::Text { content, .. }) if content == "d"));
+        assert!(next.is_none());
     }
 
     #[tokio::test]

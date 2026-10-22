@@ -58,7 +58,7 @@ mokuzu             # chat in the terminal
 `mokuzu configure` asks for your API key and model and writes
 `~/.config/mokuzu/config.toml`. Only the **Model** page is required.
 
-In the terminal chat, `/new` starts a fresh conversation, `/cast <request>` sends out a cast of crabs (see `cast_crabs` under Tools), `/browser` gives a link to a live view of the browser, and `/exit` (or Ctrl-C) quits.
+In the terminal chat, `/cast <request>` sends out a cast of crabs (see `cast_crabs` under Tools), `/browser` gives a link to a live view of the browser, and `/exit` (or Ctrl-C) quits.
 Conversations are saved, so the next `mokuzu` picks up where you left off.
 
 ## Discord
@@ -93,7 +93,7 @@ How it behaves:
   Idle threads archive after an hour.
 - Each person has their own memory, shared by all of their threads and DMs; the terminal has one
   of its own. Messages from different people are never merged into one turn.
-- 👀 means received, ✅ done, ❌ failed. `/new` starts over in that channel or thread, `/cast <request>` sends out a cast of crabs, and `/browser` gives a link to a live view of the browser.
+- 👀 means received, ✅ done, ❌ failed. `/cast <request>` sends out a cast of crabs, and `/browser` gives a link to a live view of the browser. Both show up in Discord's `/` menu, and typing them as text works too.
 - Messages sent in quick succession, or while mokuzu is still answering, are merged and answered
   once.
 - Images, text files (including the `message.txt` Discord makes from a long paste), and PDF,
@@ -134,7 +134,7 @@ Logs:
 | `web_search` | Searches through your SearXNG instance or the Brave Search API (pick one in `mokuzu configure`), optionally only recent results (`time_range`), news sites (`category`), or a date span (`after`, `before`; on SearXNG only Google engines honor it). Results show their publish date when known. | No |
 | `cast_crabs` | Cast of crabs mode (螃蟹群; a group of crabs is a cast, and mokuzu is モクズガニ, a mitten crab), modeled on Kimi's Agent Swarm and used when the model judges a task big enough, or whenever a message starts with `/cast <request>`. The model acts as an orchestrator and dispatches up to 10 named crabs per call, each with its own role and task, all running at once, while a live board shows what each one is doing. Crabs use only the read-only tools above, plus tools of MCP servers set to `approve = false`, and report back; the model sends more waves as needed and writes the answer. Needs web search configured. | No |
 | `memory` | Saves short notes about the person talking, loaded into their later conversations. | No |
-| `search_history` | Searches earlier messages of the same conversation (Discord channel or thread, or the terminal) that are no longer in context: those before a `/new`, and those replaced by a summary. Matches what the user and the model wrote, not tool output; Chinese and Japanese work without word splitting. | No |
+| `search_history` | Searches earlier messages of the same conversation (Discord channel or thread, or the terminal) that are no longer in context because a summary replaced them. Matches what the user and the model wrote, not tool output; Chinese and Japanese work without word splitting. | No |
 | `skill` | Loads, saves, or removes skills: saved instructions for recurring tasks, kept in the database, one set per person like memory. Their names and descriptions are listed in each of that person's conversations; the model loads one when a task matches, and offers to save a finished multi-step task as a new one. | Save and remove |
 | `cron` | Schedules a named prompt to run later, once (`at`) or on a cron expression, in the config's `timezone` (default: this machine's; restart `mokuzu serve` after changing it). Each run starts a fresh conversation and posts its reply in the Discord channel or thread where the job was made. Discord only; jobs run while `mokuzu serve` is up, and a run missed while it was down happens once on startup. Approval prompts during a run are denied unless approval is set to auto. A job's instructions are shown when it is made or changed; ask to change its instructions or timing, remove it, or give it a trial run now (posted where the job was made, schedule unchanged). | No |
 | `settings` | Reads or changes the model and a few limits. | Yes |
