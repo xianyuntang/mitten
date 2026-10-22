@@ -192,7 +192,9 @@ pub fn tool() -> ToolDefinition {
         description: format!(
             "Dispatch a wave of up to {MAX_AGENTS} subagents that work in parallel, each searching \
              the web, reading pages or local files, and calling MCP tools that need no approval \
-             for its own task, and return their reports. They cannot spawn subagents."
+             for its own task, and return their reports. They cannot spawn subagents, and have no \
+             `browser`: work that needs it, such as a signed-in site or one that blocks plain \
+             fetches, you do yourself."
         ),
         parameters: json!({
             "type": "object",
