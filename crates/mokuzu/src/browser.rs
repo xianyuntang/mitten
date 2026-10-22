@@ -15,6 +15,9 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
 use chromiumoxide::browser::{Browser, BrowserConfig};
+use chromiumoxide::cdp::browser_protocol::browser::{
+    Bounds, GetWindowForTargetParams, SetWindowBoundsParams,
+};
 use chromiumoxide::cdp::browser_protocol::input::{
     DispatchKeyEventParams, DispatchKeyEventParamsBuilder, DispatchKeyEventType,
     DispatchMouseEventParams, DispatchMouseEventType, InsertTextParams, MouseButton,
@@ -48,6 +51,8 @@ const SETTLE: Duration = Duration::from_secs(1);
 const MAX_CHARS: usize = 15_000;
 /// Open tabs kept; opening another closes the one used longest ago.
 const MAX_TABS: usize = 5;
+/// Size of the Xvfb screen, which Chrome's window fills.
+const SCREEN: (u32, u32) = (1280, 800);
 /// Pixels one `scroll` moves.
 const SCROLL_STEP: f64 = 600.0;
 
@@ -203,7 +208,7 @@ struct Session {
     /// Viewport position of the last mouse event, where the next move starts.
     pointer: (f64, f64),
     /// The Xvfb Chrome draws on when no screen is plugged in; killed when the session goes.
-    _screen: Option<Child>,
+    screen: Option<Child>,
 }
 
 impl Session {
@@ -234,7 +239,7 @@ impl Session {
             next: 0,
             // Mid-window, where a pointer plausibly rests after a page opens.
             pointer: (640.0, 400.0),
-            _screen: screen.map(|(child, _)| child),
+            screen: screen.map(|(child, _)| child),
         })
     }
 
@@ -296,6 +301,9 @@ impl Session {
                         }
                         // Blank first, so the tab is kept even if the load below times out.
                         let page = self.browser.new_page("about:blank").await?;
+                        if self.screen.is_some() {
+                            fill_screen(&page).await?;
+                        }
                         self.next += 1;
                         self.tabs.push((self.next, page));
                         self.next
@@ -472,7 +480,7 @@ fn launch_config(profile: &Path, virtual_display: Option<&str>) -> Result<Browse
             .with_head()
             .env("DISPLAY", display)
             .arg("ozone-platform=x11")
-            .window_size(1280, 800),
+            .window_size(SCREEN.0, SCREEN.1),
         None if screen_attached() => config.with_head(),
         None => config.new_headless_mode(),
     };
@@ -483,6 +491,25 @@ fn launch_config(profile: &Path, virtual_display: Option<&str>) -> Result<Browse
     config.build().map_err(|err| {
         anyhow!("no Chrome or Chromium found ({err}); install chromium, or set CHROME to its path")
     })
+}
+
+/// Stretches the window holding `page` over the Xvfb screen, which has no window manager to
+/// place or maximize it.
+async fn fill_screen(page: &Page) -> Result<()> {
+    let window = page
+        .execute(GetWindowForTargetParams::default())
+        .await?
+        .result
+        .window_id;
+    let bounds = Bounds::builder()
+        .left(0)
+        .top(0)
+        .width(SCREEN.0)
+        .height(SCREEN.1)
+        .build();
+    page.execute(SetWindowBoundsParams::new(window, bounds))
+        .await?;
+    Ok(())
 }
 
 /// Whether Chrome has a real screen to draw on: always off Linux; on Linux, a display server
@@ -504,7 +531,7 @@ async fn virtual_screen() -> Option<(Child, String)> {
             "1",
             "-screen",
             "0",
-            "1280x800x24",
+            &format!("{}x{}x24", SCREEN.0, SCREEN.1),
             "-nolisten",
             "tcp",
         ])
@@ -902,6 +929,20 @@ mod tests {
         .await
         .expect("evaluate");
         assert!(!webdriver, "Chrome announces automation");
+        if session.screen.is_some() {
+            let window: Vec<i64> = evaluate(
+                session.tab(Some(tab)).expect("tab"),
+                "return [screenX, screenY, outerWidth, outerHeight];",
+            )
+            .await
+            .expect("evaluate");
+            // Chrome reports the outer size one pixel short of what it was set to.
+            assert_eq!(
+                window,
+                [0, 0, 1279, 799],
+                "window does not fill the Xvfb screen"
+            );
+        }
         let _ = session.browser.close().await;
         let _ = std::fs::remove_dir_all(&profile);
     }
