@@ -10,6 +10,7 @@
 
 use std::hash::BuildHasher;
 use std::path::{Path, PathBuf};
+use std::process::Stdio;
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -27,6 +28,8 @@ use rig_core::completion::ToolDefinition;
 use rig_core::message::{Image, ImageMediaType};
 use serde::Deserialize;
 use serde_json::{Value, json};
+use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::process::Child;
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 
@@ -197,17 +200,24 @@ struct Session {
     next: u32,
     /// Viewport position of the last mouse event, where the next move starts.
     pointer: (f64, f64),
+    /// The Xvfb Chrome draws on when no screen is plugged in; killed when the session goes.
+    _screen: Option<Child>,
 }
 
 impl Session {
     /// Reattaches to a Chrome an earlier run left on `profile`, or launches one.
     async fn start(profile: &Path) -> Result<Self> {
+        let mut screen = None;
         let (mut browser, mut handler) = match reattach(profile).await {
             Some(attached) => attached,
             None => {
                 std::fs::create_dir_all(profile)
                     .with_context(|| format!("failed to create {}", profile.display()))?;
-                Browser::launch(launch_config(profile)?)
+                if !screen_attached() {
+                    screen = virtual_screen().await;
+                }
+                let display = screen.as_ref().map(|(_, display)| display.as_str());
+                Browser::launch(launch_config(profile, display)?)
                     .await
                     .context("failed to start Chrome; close any other Chrome using its profile")?
             }
@@ -222,6 +232,7 @@ impl Session {
             next: 0,
             // Mid-window, where a pointer plausibly rests after a page opens.
             pointer: (640.0, 400.0),
+            _screen: screen.map(|(child, _)| child),
         })
     }
 
@@ -432,13 +443,10 @@ fn tab_name(args: &Args) -> String {
     args.tab.map_or_else(String::new, |n| n.to_string())
 }
 
-/// Chrome as a person would run it: headful where there is a display, and none of the
-/// automation flags chromiumoxide adds by default.
-fn launch_config(profile: &Path) -> Result<BrowserConfig> {
-    let display = !cfg!(target_os = "linux")
-        || ((std::env::var_os("DISPLAY").is_some()
-            || std::env::var_os("WAYLAND_DISPLAY").is_some())
-            && monitor_connected());
+/// Chrome as a person would run it: headful on the real screen, or on `virtual_display` when
+/// there is none, headless only without either, and none of the automation flags chromiumoxide
+/// adds by default.
+fn launch_config(profile: &Path, virtual_display: Option<&str>) -> Result<BrowserConfig> {
     let mut config = BrowserConfig::builder()
         .disable_default_args()
         .args(["no-first-run", "no-default-browser-check"])
@@ -447,10 +455,15 @@ fn launch_config(profile: &Path) -> Result<BrowserConfig> {
         .user_data_dir(profile)
         .launch_timeout(LAUNCH_TIMEOUT)
         .request_timeout(REQUEST_TIMEOUT);
-    config = if display {
-        config.with_head()
-    } else {
-        config.new_headless_mode()
+    config = match virtual_display {
+        // X11, since a desktop session may also set WAYLAND_DISPLAY.
+        Some(display) => config
+            .with_head()
+            .env("DISPLAY", display)
+            .arg("ozone-platform=x11")
+            .window_size(1280, 800),
+        None if screen_attached() => config.with_head(),
+        None => config.new_headless_mode(),
     };
     // Chrome refuses to start its sandbox as root, e.g. in a container.
     if std::env::var("USER").is_ok_and(|user| user == "root") {
@@ -459,6 +472,54 @@ fn launch_config(profile: &Path) -> Result<BrowserConfig> {
     config.build().map_err(|err| {
         anyhow!("no Chrome or Chromium found ({err}); install chromium, or set CHROME to its path")
     })
+}
+
+/// Whether Chrome has a real screen to draw on: always off Linux; on Linux, a display server
+/// with a monitor plugged in.
+fn screen_attached() -> bool {
+    !cfg!(target_os = "linux")
+        || ((std::env::var_os("DISPLAY").is_some()
+            || std::env::var_os("WAYLAND_DISPLAY").is_some())
+            && monitor_connected())
+}
+
+/// Starts Xvfb on a free display and returns it with its `DISPLAY` value, or `None` when Xvfb
+/// is not installed, so Chrome runs headful (no `HeadlessChrome` in its user agent) without a
+/// screen.
+async fn virtual_screen() -> Option<(Child, String)> {
+    let spawned = tokio::process::Command::new("Xvfb")
+        .args([
+            "-displayfd",
+            "1",
+            "-screen",
+            "0",
+            "1280x800x24",
+            "-nolisten",
+            "tcp",
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .kill_on_drop(true)
+        .spawn();
+    let mut child = match spawned {
+        Ok(child) => child,
+        Err(err) => {
+            tracing::debug!("no Xvfb ({err}); running Chrome headless");
+            return None;
+        }
+    };
+    // `-displayfd 1` prints the display number it picked once it is ready.
+    let mut line = String::new();
+    let mut stdout = BufReader::new(child.stdout.take()?);
+    let read = tokio::time::timeout(Duration::from_secs(10), stdout.read_line(&mut line)).await;
+    let number = line.trim();
+    if !matches!(read, Ok(Ok(_))) || number.is_empty() {
+        tracing::warn!("Xvfb did not start; running Chrome headless");
+        return None;
+    }
+    tracing::debug!("Chrome draws on Xvfb display :{number}");
+    Some((child, format!(":{number}")))
 }
 
 /// Whether a screen is plugged in. A desktop session runs on a headless Raspberry Pi too, and a
