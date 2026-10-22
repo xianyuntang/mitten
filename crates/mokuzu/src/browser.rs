@@ -417,8 +417,9 @@ fn tab_name(args: &Args) -> String {
 /// automation flags chromiumoxide adds by default.
 fn launch_config(profile: &Path) -> Result<BrowserConfig> {
     let display = !cfg!(target_os = "linux")
-        || std::env::var_os("DISPLAY").is_some()
-        || std::env::var_os("WAYLAND_DISPLAY").is_some();
+        || ((std::env::var_os("DISPLAY").is_some()
+            || std::env::var_os("WAYLAND_DISPLAY").is_some())
+            && monitor_connected());
     let mut config = BrowserConfig::builder()
         .disable_default_args()
         .args(["no-first-run", "no-default-browser-check"])
@@ -438,6 +439,17 @@ fn launch_config(profile: &Path) -> Result<BrowserConfig> {
     }
     config.build().map_err(|err| {
         anyhow!("no Chrome or Chromium found ({err}); install chromium, or set CHROME to its path")
+    })
+}
+
+/// Whether a screen is plugged in. A desktop session runs on a headless Raspberry Pi too, and a
+/// window there is never drawn, so pages never finish rendering.
+fn monitor_connected() -> bool {
+    std::fs::read_dir("/sys/class/drm").is_ok_and(|ports| {
+        ports.flatten().any(|port| {
+            std::fs::read_to_string(port.path().join("status"))
+                .is_ok_and(|status| status.trim() == "connected")
+        })
     })
 }
 
