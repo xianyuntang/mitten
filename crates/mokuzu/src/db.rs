@@ -23,6 +23,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/0009_memories_per_user.sql"),
     include_str!("../migrations/0010_skills.sql"),
     include_str!("../migrations/0011_skills_per_user.sql"),
+    include_str!("../migrations/0012_message_search.sql"),
 ];
 
 /// Row of `conversations`.
@@ -256,14 +257,46 @@ impl Db {
         .await
     }
 
-    /// Deletes every message in the conversation, keeping the conversation row.
+    /// Archives every message in the conversation, so it starts empty but stays searchable.
     pub async fn clear(&self, conversation_id: i64) -> Result<()> {
         self.with_conn(move |conn| {
             conn.execute(
-                "DELETE FROM messages WHERE conversation_id = ?1",
+                "UPDATE messages SET archived = 1 WHERE conversation_id = ?1",
                 params![conversation_id],
             )?;
             Ok(())
+        })
+        .await
+    }
+
+    /// Archived messages of the conversation whose text contains every one of `terms` (ignoring
+    /// ASCII case), newest first: (sent at, role, text).
+    pub async fn search(
+        &self,
+        conversation_id: i64,
+        terms: Vec<String>,
+        limit: usize,
+    ) -> Result<Vec<(String, String, String)>> {
+        self.with_conn(move |conn| {
+            let mut sql = "SELECT messages.created_at, messages.role, message_text.text
+                 FROM message_text JOIN messages ON messages.id = message_text.rowid
+                 WHERE messages.conversation_id = ? AND messages.archived = 1"
+                .to_owned();
+            // The trigram index serves LIKE for terms of three or more characters; shorter
+            // ones scan the conversation's rows.
+            let mut values = vec![rusqlite::types::Value::from(conversation_id)];
+            for term in terms {
+                sql.push_str(" AND message_text.text LIKE ?");
+                let term = term.replace(['%', '_'], "");
+                values.push(format!("%{term}%").into());
+            }
+            sql.push_str(" ORDER BY messages.id DESC LIMIT ?");
+            values.push(i64::try_from(limit)?.into());
+            let mut stmt = conn.prepare(&sql)?;
+            let rows = stmt.query_map(rusqlite::params_from_iter(values), |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+            })?;
+            Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
         })
         .await
     }
@@ -481,6 +514,53 @@ mod tests {
 
         db.clear(conversation.id).await.expect("clear");
         assert!(db.messages(conversation.id).await.expect("load").is_empty());
+    }
+
+    #[tokio::test]
+    async fn search_finds_archived_text_only() {
+        let db = Db::open_in_memory().expect("open");
+        let conversation = db.conversation("terminal").await.expect("conversation");
+        let other = db.conversation("discord:1").await.expect("conversation");
+        let text = |role: &str, text: &str| json!({"role": role, "content": [{"type": "text", "text": text}]});
+        let tool = json!({"role": "user", "content": [{"type": "toolresult", "content": [{"type": "text", "text": "貓咪 tool output"}]}]});
+        db.append(
+            conversation.id,
+            vec![
+                text("user", "我家的貓咪叫 Mochi"),
+                tool,
+                text("assistant", "記住了"),
+            ],
+        )
+        .await
+        .expect("append");
+        db.append(other.id, vec![text("user", "別人的貓咪")])
+            .await
+            .expect("append");
+        let search = |terms: &[&str]| {
+            db.search(
+                conversation.id,
+                terms.iter().map(|t| (*t).to_owned()).collect(),
+                10,
+            )
+        };
+        assert!(
+            search(&["貓咪"]).await.expect("search").is_empty(),
+            "live history is already in context"
+        );
+
+        db.clear(conversation.id).await.expect("clear");
+        let hits = search(&["貓咪", "mochi"]).await.expect("search");
+        assert_eq!(hits.len(), 1, "{hits:?}");
+        assert_eq!(
+            (hits[0].1.as_str(), hits[0].2.as_str()),
+            ("user", "我家的貓咪叫 Mochi")
+        );
+        assert!(search(&["貓咪", "Luna"]).await.expect("search").is_empty());
+        assert_eq!(
+            search(&["記"]).await.expect("search").len(),
+            1,
+            "short terms scan"
+        );
     }
 
     #[tokio::test]

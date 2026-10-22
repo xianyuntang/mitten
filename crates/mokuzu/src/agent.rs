@@ -390,6 +390,7 @@ pub(crate) fn request(
             files::list_tool(),
             document::view_tool(),
             memory::tool(),
+            memory::history_tool(),
             skill::tool(),
             fetch::tool(),
             browser::tool(),
@@ -493,6 +494,20 @@ impl Agent {
             "saved; memory uses {used}/{} characters. Every conversation with this person sees it from its next message.",
             memory::CHAR_LIMIT
         ))
+    }
+
+    async fn search_history(&self, args: &Value, io: &mut impl Io) -> Result<String> {
+        let terms = match memory::history_terms(args) {
+            Ok(terms) => terms,
+            Err(problem) => return Ok(format!("error: {problem}")),
+        };
+        io.note(&format!("🔎 searching history: {}", terms.join(" ")))
+            .await?;
+        let hits = self
+            .db
+            .search(self.conversation_id, terms, memory::HISTORY_HITS)
+            .await?;
+        Ok(memory::render_hits(&hits))
     }
 
     /// Runs one skill tool call; saving and removing need the user's approval. Problems go back
@@ -742,6 +757,14 @@ impl Agent {
         user: Option<u64>,
         io: &mut impl Io,
     ) -> Result<()> {
+        if prompt.trim() == browser::BROWSER_COMMAND {
+            let link = browser::view_link().await?;
+            return io
+                .say(&format!(
+                    "Live view of the browser (this machine's network only): {link}"
+                ))
+                .await;
+        }
         let cast_prompt;
         let prompt = match swarm::request(prompt) {
             Some("") => {
@@ -972,6 +995,7 @@ impl Agent {
                         output
                     }
                     "memory" => self.remember(&call.function.arguments, io).await?,
+                    "search_history" => self.search_history(&call.function.arguments, io).await?,
                     "skill" => self.skill(&call.function.arguments, io).await?,
                     "cron" if self.schedules() => self.cron(&call.function.arguments, io).await?,
                     "settings" => self.settings(&call.function.arguments, io).await?,

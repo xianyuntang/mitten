@@ -10,7 +10,7 @@ use crate::db::Memory;
 
 /// Total characters across one person's entries; everything here rides along in every request.
 // ponytail: fixed budget; make it configurable if people hit it.
-pub const CHAR_LIMIT: usize = 2_200;
+pub const CHAR_LIMIT: usize = 5_000;
 
 /// Stable guidance for the system prompt; the entries themselves come from `snapshot`.
 pub const GUIDANCE: &str = "\
@@ -59,6 +59,60 @@ pub fn tool() -> ToolDefinition {
             "required": ["action"],
         }),
     }
+}
+
+/// Hits returned per history search, and characters kept of each.
+pub const HISTORY_HITS: usize = 10;
+const HIT_CHARS: usize = 500;
+
+pub fn history_tool() -> ToolDefinition {
+    ToolDefinition {
+        name: "search_history".to_owned(),
+        description: "Search the earlier messages of this conversation that are no longer in your \
+                      context: those before a /new, and those replaced by a summary. Use it when the \
+                      user refers to something from before that you cannot see. Finds messages \
+                      containing every word of `query` (any language, ASCII case ignored), newest \
+                      first. Covers what the user and you wrote, not tool output."
+            .to_owned(),
+        parameters: json!({
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "Words to look for, separated by spaces, e.g. `貓 名字`."},
+            },
+            "required": ["query"],
+        }),
+    }
+}
+
+/// The words of a search_history call, or a problem for the model.
+pub fn history_terms(args: &Value) -> Result<Vec<String>, String> {
+    let terms: Vec<String> = args["query"]
+        .as_str()
+        .unwrap_or_default()
+        .split_whitespace()
+        .map(str::to_owned)
+        .collect();
+    if terms.is_empty() {
+        return Err("`query` needs at least one word".to_owned());
+    }
+    Ok(terms)
+}
+
+/// Search hits as the model sees them.
+pub fn render_hits(hits: &[(String, String, String)]) -> String {
+    if hits.is_empty() {
+        return "no earlier messages match".to_owned();
+    }
+    hits.iter()
+        .map(|(at, role, text)| {
+            let mut short: String = text.chars().take(HIT_CHARS).collect();
+            if short.len() < text.len() {
+                short.push('…');
+            }
+            format!("[{at} {role}] {short}")
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n")
 }
 
 /// The saved entries as they appear in the system prompt.

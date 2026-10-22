@@ -380,7 +380,7 @@ impl App {
             (Color::Cyan, String::new())
         };
         let mut hints =
-            "enter send · alt+enter newline · /new · /cast · ↑↓ pgup pgdn scroll · ctrl+c quit "
+            "enter send · alt+enter newline · /new · /cast · /browser · ↑↓ pgup pgdn scroll · ctrl+c quit "
                 .to_owned();
         if self.scroll > 0 {
             hints = format!("↓ {} more lines · {hints}", self.scroll);
