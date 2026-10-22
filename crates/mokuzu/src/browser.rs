@@ -36,6 +36,8 @@ use crate::document;
 
 const LAUNCH_TIMEOUT: Duration = Duration::from_secs(30);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+/// Longest a page load may take before the call gives up, leaving the tab open.
+const LOAD_LIMIT: Duration = Duration::from_secs(45);
 /// Wait after a click, key, or load for the page to react.
 // ponytail: fixed settle time; wait on network idle if pages come back half-updated.
 const SETTLE: Duration = Duration::from_secs(1);
@@ -159,10 +161,20 @@ pub async fn run(config: &Config, args: &Value, io: &mut impl Io) -> (String, Ve
         let args: Args = serde_json::from_value(args.clone()).context("invalid arguments")?;
         let mut session = SESSION.lock().await;
         if session.as_ref().is_none_or(|s| s.driver.is_finished()) {
-            *session = Some(Session::start(&profile(config)).await?);
+            tracing::debug!("starting Chrome");
+            let profile = profile(config);
+            let started = Session::start(&profile);
+            let started = tokio::time::timeout(LAUNCH_TIMEOUT * 2, started)
+                .await
+                .map_err(|_| anyhow!("Chrome did not start or answer in time"))??;
+            *session = Some(started);
+            tracing::debug!("Chrome is ready");
         }
         let session = session.as_mut().context("Chrome is not running")?;
-        session.refresh().await?;
+        tokio::time::timeout(REQUEST_TIMEOUT, session.refresh())
+            .await
+            .map_err(|_| anyhow!("Chrome stopped answering"))??;
+        tracing::debug!(action = %args.action, tab = ?args.tab, "browser action");
         session.act(&args, io).await
     };
     result
@@ -261,10 +273,7 @@ impl Session {
                     return Ok(denied());
                 }
                 let id = match args.tab {
-                    Some(id) => {
-                        self.tab(Some(id))?.goto(url.as_str()).await?;
-                        id
-                    }
+                    Some(id) => id,
                     None => {
                         while self.tabs.len() >= MAX_TABS {
                             let (_, stale) = self.tabs.remove(0);
@@ -272,12 +281,22 @@ impl Session {
                                 tracing::debug!("failed to close a stale tab: {err}");
                             }
                         }
-                        let page = self.browser.new_page(url.as_str()).await?;
+                        // Blank first, so the tab is kept even if the load below times out.
+                        let page = self.browser.new_page("about:blank").await?;
                         self.next += 1;
                         self.tabs.push((self.next, page));
                         self.next
                     }
                 };
+                tokio::time::timeout(LOAD_LIMIT, self.tab(Some(id))?.goto(url.as_str()))
+                    .await
+                    .map_err(|_| {
+                        anyhow!(
+                            "tab {id} did not finish loading in {}s; read it to see what loaded",
+                            LOAD_LIMIT.as_secs()
+                        )
+                    })??;
+                tracing::debug!(tab = id, "page loaded");
                 tokio::time::sleep(SETTLE).await;
                 let page = self.tab(Some(id))?;
                 let title = page.get_title().await?.unwrap_or_default();
