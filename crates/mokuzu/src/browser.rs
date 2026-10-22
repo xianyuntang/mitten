@@ -130,7 +130,7 @@ pub fn tool() -> ToolDefinition {
                     "type": "string",
                     "enum": ["tabs", "navigate", "read", "click", "type", "scroll", "screenshot", "close"],
                 },
-                "tab": {"type": "integer", "description": "Tab number from `tabs` or `navigate`."},
+                "tab": {"type": "integer", "description": "Tab number from `tabs` or `navigate`. Leave out for navigate to open a new tab."},
                 "url": {"type": "string", "description": "For navigate: an http or https URL."},
                 "ref": {"type": "integer", "description": "For click and type: a control's ref from `read`."},
                 "text": {"type": "string", "description": "For type: the text to enter."},
@@ -161,7 +161,9 @@ struct Args {
 /// Runs one tool call; failures come back as text for the model, and a screenshot as an image.
 pub async fn run(config: &Config, args: &Value, io: &mut impl Io) -> (String, Vec<Image>) {
     let result = async {
-        let args: Args = serde_json::from_value(args.clone()).context("invalid arguments")?;
+        let mut args: Args = serde_json::from_value(args.clone()).context("invalid arguments")?;
+        // Tabs count from 1; models send 0 for "no tab", meaning a new one.
+        args.tab = args.tab.filter(|&tab| tab != 0);
         let mut session = SESSION.lock().await;
         if session.as_ref().is_none_or(|s| s.driver.is_finished()) {
             tracing::debug!("starting Chrome");
@@ -449,7 +451,13 @@ fn tab_name(args: &Args) -> String {
 fn launch_config(profile: &Path, virtual_display: Option<&str>) -> Result<BrowserConfig> {
     let mut config = BrowserConfig::builder()
         .disable_default_args()
-        .args(["no-first-run", "no-default-browser-check"])
+        // No startup tab: on Linux Chromium, chromiumoxide never sees a load finish in the tab
+        // Chrome opens itself, so navigating it hangs. Mokuzu opens its own tabs.
+        .args([
+            "no-first-run",
+            "no-default-browser-check",
+            "no-startup-window",
+        ])
         .hide()
         .viewport(None)
         .user_data_dir(profile)
