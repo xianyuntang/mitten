@@ -1028,6 +1028,73 @@ mod tests {
 
     /// `cargo test -- --ignored browser_round_trip`
     #[tokio::test]
+    #[ignore = "starts a real Chrome and types through the live view"]
+    async fn typing_on_the_live_view_reaches_the_page() {
+        let mut session = Session::start(
+            &std::env::temp_dir().join(format!("mokuzu-viewer-typing-{}", std::process::id())),
+        )
+        .await
+        .expect("Chrome starts");
+        session
+            .act(
+                &call(json!({"action": "navigate", "url": "https://example.com"})),
+                &mut Approver,
+            )
+            .await
+            .expect("navigate");
+        let target = session.tabs[0].1.clone();
+        let _: bool = evaluate(&target, "document.body.innerHTML = '<input id=t style=\"position:fixed;inset:0;width:100%;height:100%;font-size:40px\">'; return true;").await.expect("input");
+        viewer::publish(&session.tabs);
+        let link = view_link().await.expect("view");
+        let viewer = session
+            .browser
+            .new_page(link.as_str())
+            .await
+            .expect("viewer");
+        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+        let center: Vec<f64> = evaluate(&viewer, "const r = document.getElementById('screen').getBoundingClientRect(); return [r.x + r.width / 2, r.y + r.height / 2];").await.expect("rect");
+        let at = (center[0], center[1]);
+        mouse(&viewer, DispatchMouseEventType::MouseMoved, at, None)
+            .await
+            .unwrap();
+        mouse(&viewer, DispatchMouseEventType::MousePressed, at, Some(1))
+            .await
+            .unwrap();
+        mouse(&viewer, DispatchMouseEventType::MouseReleased, at, Some(0))
+            .await
+            .unwrap();
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        let focused: String = evaluate(&viewer, "return document.activeElement.id;")
+            .await
+            .unwrap();
+        assert_eq!(focused, "keys");
+        type_text(&viewer, "ab中文").await.unwrap();
+        send_key(
+            &viewer,
+            key_event(
+                DispatchKeyEventType::RawKeyDown,
+                "Backspace",
+                "Backspace",
+                8,
+                0,
+            ),
+        )
+        .await
+        .unwrap();
+        send_key(
+            &viewer,
+            key_event(DispatchKeyEventType::KeyUp, "Backspace", "Backspace", 8, 0),
+        )
+        .await
+        .unwrap();
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        let value: String = evaluate(&target, "return document.getElementById('t').value;")
+            .await
+            .unwrap();
+        assert_eq!(value, "ab中");
+    }
+
+    #[tokio::test]
     #[ignore = "starts a real Chrome and loads example.com"]
     async fn browser_round_trip() {
         let profile =

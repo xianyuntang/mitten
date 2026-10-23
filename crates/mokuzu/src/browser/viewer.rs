@@ -369,11 +369,10 @@ const PAGE: &str = r#"<!doctype html>
   html, body { height: 100%; }
   body { margin: 0; display: flex; flex-direction: column; background: var(--background);
     color: var(--foreground); font: 14px/1.5 var(--font); }
-  header, footer { display: flex; align-items: center; gap: var(--space-2); background: var(--card);
+  header { display: flex; align-items: center; gap: var(--space-2); background: var(--card);
     padding: var(--space-2) max(var(--space-4), env(safe-area-inset-right))
       var(--space-2) max(var(--space-4), env(safe-area-inset-left)); }
   header { border-bottom: 1px solid var(--muted); padding-top: max(var(--space-2), env(safe-area-inset-top)); }
-  footer { border-top: 1px solid var(--muted); padding-bottom: max(var(--space-2), env(safe-area-inset-bottom)); }
   .brand { display: flex; align-items: center; gap: var(--space-2); font-weight: 600;
     letter-spacing: -.01em; white-space: nowrap; padding-right: var(--space-2); }
   svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 2;
@@ -389,18 +388,25 @@ const PAGE: &str = r#"<!doctype html>
     place-items: center; }
   button:hover:not(:disabled) { border-color: var(--border); }
   button:active:not(:disabled) { opacity: .7; }
-  button.send { width: auto; padding: 0 var(--space-4); background: var(--accent);
-    border-color: var(--accent); color: var(--on-accent); font-weight: 600; }
   select { cursor: pointer; max-width: 30%; }
   :disabled { opacity: .4; cursor: not-allowed; }
   .grow { flex: 1; }
   main { flex: 1; min-height: 0; position: relative; }
   /* Pinned to main's box so the picture shrinks to fit it whatever its shape. */
   .stage { position: absolute; inset: var(--space-4); display: flex; align-items: center;
-    justify-content: center; }
+    justify-content: center; padding-bottom: env(safe-area-inset-bottom); }
+  /* Takes the keys typed on the picture, so input methods, pasting, and phone keyboards work.
+     It sits where the user clicked, so an input method's candidates show up there, and is only
+     seen while composing. */
+  #keys { position: fixed; left: 0; top: 0; width: 1px; height: 1.5em; padding: 0 var(--space-1);
+    resize: none; overflow: hidden; white-space: nowrap; border: 0; outline: 0; opacity: 0;
+    pointer-events: none; font: 16px var(--font); color: var(--foreground); background: var(--card);
+    border-radius: 4px; }
+  #keys.composing { opacity: 1; width: auto; min-width: 2em; field-sizing: content;
+    box-shadow: 0 0 0 2px var(--ring); }
+  main:focus-within #screen { outline: 2px solid var(--ring); outline-offset: 3px; }
   #screen { display: block; max-width: 100%; max-height: 100%; border-radius: var(--radius);
     border: 1px solid var(--muted); box-shadow: var(--shadow); cursor: pointer; background: var(--card); }
-  #screen:focus-visible { outline-offset: 3px; }
   #screen[hidden], #empty[hidden] { display: none; }
   #empty { text-align: center; color: var(--muted-foreground); max-width: 340px; }
   #empty svg { width: 32px; height: 32px; stroke-width: 1.5; margin-bottom: var(--space-3); }
@@ -434,18 +440,15 @@ const PAGE: &str = r#"<!doctype html>
   <span id="status" class="pill" data-state="wait" role="status" aria-atomic="true">Connecting</span>
 </header>
 <main><div class="stage">
-  <img id="screen" tabindex="0" alt="Live view of the browser tab; click to use it" hidden>
+  <img id="screen" alt="Live view of the browser tab; click it to use the page, then type" hidden>
   <div id="empty">
     <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4"/></svg>
     <strong id="empty-title">Connecting to mokuzu…</strong>
     <span id="empty-text"></span>
   </div>
-</div></main>
-<footer>
-  <input id="text" class="grow" placeholder="Type text for the page, Enter to send" autocomplete="off"
-    aria-label="Text to send">
-  <button id="send" class="send">Send</button>
-</footer>
+</div>
+<textarea id="keys" aria-label="Typing goes to the page" autocomplete="off" autocapitalize="off"
+  autocorrect="off" spellcheck="false" rows="1"></textarea></main>
 <script>
 const token = new URLSearchParams(location.search).get('token');
 const api = (path, tab) => `${path}?token=${token}` + (tab == null ? '' : `&tab=${tab}`);
@@ -462,18 +465,24 @@ async function tabs() {
   const shown = tab;
   if (!list.some(t => t.id === tab)) tab = list.at(-1)?.id ?? null;
   $('tab').replaceChildren(...list.map(t => new Option(t.title || 'Untitled', t.id, false, t.id === tab)));
-  for (const id of ['tab', 'back', 'url', 'text', 'send']) $(id).disabled = !list.length;
+  for (const id of ['tab', 'back', 'url']) $(id).disabled = !list.length;
   const current = list.find(t => t.id === tab);
   if (current && document.activeElement !== $('url')) $('url').value = current.url;
   if (tab !== shown) show();
 }
 $('tab').onchange = () => { tab = Number($('tab').value); show(); tabs().catch(() => {}); };
 
-async function send(input) {
-  if (tab == null) return false;
-  const reply = await fetch(api('/input', tab), { method: 'POST', body: JSON.stringify(input) });
-  if (!reply.ok) status(await reply.text(), 'error');
-  return reply.ok;
+// One at a time, so keys typed quickly reach the page in order.
+let queue = Promise.resolve(true);
+function send(input) {
+  const target = tab;
+  queue = queue.catch(() => false).then(async () => {
+    if (target == null) return false;
+    const reply = await fetch(api('/input', target), { method: 'POST', body: JSON.stringify(input) });
+    if (!reply.ok) status(await reply.text(), 'error');
+    return reply.ok;
+  });
+  return queue;
 }
 
 // Chrome pushes a frame on every repaint over one long response the browser shows as it comes.
@@ -494,20 +503,24 @@ $('screen').onerror = () => {
 };
 
 const at = e => { const r = $('screen').getBoundingClientRect(); return { x: (e.clientX - r.left) / r.width, y: (e.clientY - r.top) / r.height }; };
-$('screen').addEventListener('click', e => { $('screen').focus(); send({ kind: 'click', ...at(e) }); });
-$('screen').addEventListener('wheel', e => { e.preventDefault(); send({ kind: 'wheel', ...at(e), dy: e.deltaY }); }, { passive: false });
-$('screen').addEventListener('keydown', e => {
-  if (e.metaKey || e.ctrlKey || e.altKey || e.isComposing) return;
-  e.preventDefault();
-  send(e.key.length === 1 ? { kind: 'text', text: e.key } : { kind: 'key', key: e.key });
+const keys = $('keys');
+$('screen').addEventListener('click', e => {
+  send({ kind: 'click', ...at(e) });
+  keys.style.left = `${e.clientX}px`; keys.style.top = `${e.clientY}px`;
+  keys.focus({ preventScroll: true });
 });
-function sendText() {
-  if (!$('text').value) return;
-  send({ kind: 'text', text: $('text').value });
-  $('text').value = '';
-}
-$('text').addEventListener('keydown', e => { if (e.key === 'Enter' && !e.isComposing) sendText(); });
-$('send').onclick = sendText;
+$('screen').addEventListener('wheel', e => { e.preventDefault(); send({ kind: 'wheel', ...at(e), dy: e.deltaY }); }, { passive: false });
+const SPECIAL = new Set(['Enter', 'Backspace', 'Tab', 'Escape', 'Delete', 'ArrowLeft', 'ArrowUp', 'ArrowRight', 'ArrowDown']);
+keys.addEventListener('keydown', e => {
+  if (e.isComposing || e.metaKey || e.ctrlKey || e.altKey || !SPECIAL.has(e.key)) return;
+  e.preventDefault();
+  send({ kind: 'key', key: e.key });
+});
+// Typed characters, pasted text, and finished compositions all land here first.
+function flush() { if (keys.value) { send({ kind: 'text', text: keys.value }); keys.value = ''; } }
+keys.addEventListener('input', e => { if (!e.isComposing) flush(); });
+keys.addEventListener('compositionstart', () => keys.classList.add('composing'));
+keys.addEventListener('compositionend', () => { keys.classList.remove('composing'); flush(); });
 $('url').addEventListener('keydown', e => {
   if (e.key !== 'Enter' || e.isComposing) return;
   let url = $('url').value.trim();
