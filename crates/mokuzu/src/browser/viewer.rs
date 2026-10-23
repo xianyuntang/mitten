@@ -238,7 +238,8 @@ async fn tabs() -> Value {
     let mut list = Vec::new();
     for (id, page) in tabs {
         let title = page.get_title().await.ok().flatten().unwrap_or_default();
-        list.push(json!({"id": id, "title": title}));
+        let url = page.url().await.ok().flatten().unwrap_or_default();
+        list.push(json!({"id": id, "title": title, "url": url}));
     }
     Value::Array(list)
 }
@@ -341,60 +342,156 @@ fn special_key(key: &str) -> Option<(&'static str, i64)> {
 const PAGE: &str = r#"<!doctype html>
 <html lang="en">
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="referrer" content="no-referrer">
 <title>mokuzu browser</title>
 <style>
-  :root { color-scheme: light dark; --bg: #f4f4f5; --fg: #18181b; --line: #d4d4d8; }
-  @media (prefers-color-scheme: dark) { :root { --bg: #18181b; --fg: #f4f4f5; --line: #3f3f46; } }
-  body { margin: 0; background: var(--bg); color: var(--fg); font: 14px system-ui, sans-serif; }
-  .bar { display: flex; gap: 6px; padding: 8px; }
-  .bar input, .bar select, .bar button { font: inherit; padding: 6px 8px; border: 1px solid var(--line);
-    border-radius: 6px; background: transparent; color: inherit; min-width: 0; }
+  /* Tokens from ui-ux-pro-max's design system for a developer tool: Swiss minimal, slate, dense,
+     dark first with a light theme, green for a live connection. */
+  :root {
+    color-scheme: dark light;
+    --background: #0f172a; --card: #1b2336; --muted: #272f42; --border: #475569;
+    --foreground: #f8fafc; --muted-foreground: #94a3b8; --ring: #f8fafc;
+    --accent: #22c55e; --on-accent: #0f172a; --warning: #f59e0b; --destructive: #ef4444;
+    --shadow: 0 1px 2px rgb(0 0 0 / .4), 0 12px 32px rgb(0 0 0 / .35);
+    --font: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+    --mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+    --space-1: 4px; --space-2: 8px; --space-3: 12px; --space-4: 16px;
+    --radius: 8px; --control: 40px; --fast: 150ms;
+  }
+  @media (prefers-color-scheme: light) {
+    :root { --background: #f1f5f9; --card: #ffffff; --muted: #e2e8f0; --border: #94a3b8;
+      --foreground: #0f172a; --muted-foreground: #475569; --ring: #0f172a; --accent: #15803d;
+      --on-accent: #ffffff; --warning: #b45309; --destructive: #b91c1c;
+      --shadow: 0 1px 2px rgb(15 23 42 / .08), 0 12px 32px rgb(15 23 42 / .12); }
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body { margin: 0; display: flex; flex-direction: column; background: var(--background);
+    color: var(--foreground); font: 14px/1.5 var(--font); }
+  header, footer { display: flex; align-items: center; gap: var(--space-2); background: var(--card);
+    padding: var(--space-2) max(var(--space-4), env(safe-area-inset-right))
+      var(--space-2) max(var(--space-4), env(safe-area-inset-left)); }
+  header { border-bottom: 1px solid var(--muted); padding-top: max(var(--space-2), env(safe-area-inset-top)); }
+  footer { border-top: 1px solid var(--muted); padding-bottom: max(var(--space-2), env(safe-area-inset-bottom)); }
+  .brand { display: flex; align-items: center; gap: var(--space-2); font-weight: 600;
+    letter-spacing: -.01em; white-space: nowrap; padding-right: var(--space-2); }
+  svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 2;
+    stroke-linecap: round; stroke-linejoin: round; flex: none; }
+  input, select, button { font: inherit; color: inherit; height: var(--control); min-width: 0;
+    border-radius: var(--radius); border: 1px solid var(--muted); background: var(--background);
+    padding: 0 var(--space-3); transition: border-color var(--fast), opacity var(--fast); }
+  input::placeholder { color: var(--muted-foreground); }
+  input:hover:not(:disabled), select:hover:not(:disabled) { border-color: var(--border); }
+  :focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
+  #url { font-family: var(--mono); font-size: 13px; }
+  button { cursor: pointer; padding: 0; width: var(--control); flex: none; display: inline-grid;
+    place-items: center; }
+  button:hover:not(:disabled) { border-color: var(--border); }
+  button:active:not(:disabled) { opacity: .7; }
+  button.send { width: auto; padding: 0 var(--space-4); background: var(--accent);
+    border-color: var(--accent); color: var(--on-accent); font-weight: 600; }
+  select { cursor: pointer; max-width: 30%; }
+  :disabled { opacity: .4; cursor: not-allowed; }
   .grow { flex: 1; }
-  #screen { display: block; width: 100%; outline: none; cursor: default; }
-  #screen:focus { box-shadow: 0 0 0 2px #3b82f6 inset; }
-  #status { padding: 0 8px 8px; opacity: .7; }
+  main { flex: 1; min-height: 0; position: relative; }
+  /* Pinned to main's box so the picture shrinks to fit it whatever its shape. */
+  .stage { position: absolute; inset: var(--space-4); display: flex; align-items: center;
+    justify-content: center; }
+  #screen { display: block; max-width: 100%; max-height: 100%; border-radius: var(--radius);
+    border: 1px solid var(--muted); box-shadow: var(--shadow); cursor: pointer; background: var(--card); }
+  #screen:focus-visible { outline-offset: 3px; }
+  #screen[hidden], #empty[hidden] { display: none; }
+  #empty { text-align: center; color: var(--muted-foreground); max-width: 340px; }
+  #empty svg { width: 32px; height: 32px; stroke-width: 1.5; margin-bottom: var(--space-3); }
+  #empty strong { display: block; color: var(--foreground); font-size: 16px; margin-bottom: var(--space-1); }
+  .pill { display: inline-flex; align-items: center; gap: var(--space-2); height: 28px;
+    padding: 0 var(--space-3); border-radius: 999px; background: var(--muted); font-size: 12px;
+    font-weight: 500; white-space: nowrap; }
+  .pill::before { content: ""; width: 8px; height: 8px; border-radius: 50%;
+    background: var(--state, var(--muted-foreground)); }
+  .pill[data-state="live"] { --state: var(--accent); }
+  .pill[data-state="wait"] { --state: var(--warning); }
+  .pill[data-state="error"] { --state: var(--destructive); }
+  @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+  /* Fingers need bigger targets, and iOS zooms into fields with text under 16px. */
+  @media (pointer: coarse) { :root { --control: 44px; } input, select, button { font-size: 16px; } }
+  @media (max-width: 600px) {
+    header { flex-wrap: wrap; }
+    .brand { display: none; }
+    select { max-width: none; flex: 1; order: 1; }
+    .pill { order: 1; }
+    #url { order: 2; flex-basis: 100%; }
+    .stage { inset: var(--space-2); }
+  }
 </style>
-<div class="bar">
+<header>
+  <span class="brand"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 9h18M7 6.5h.01M10 6.5h.01"/></svg>mokuzu</span>
+  <button id="back" title="Back" aria-label="Back"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M19 12H5M12 19l-7-7 7-7"/></svg></button>
   <select id="tab" aria-label="Tab"></select>
-  <button id="back" title="Back">←</button>
-  <input id="url" class="grow" placeholder="Open a URL (Enter)" inputmode="url">
-</div>
-<img id="screen" tabindex="0" alt="Chrome tab">
-<div class="bar">
-  <input id="text" class="grow" placeholder="Type text here, then Enter to send it to the page">
-</div>
-<div id="status">Click the picture to use the page; keys go to it while it has focus.</div>
+  <input id="url" class="grow" placeholder="Enter a URL to open in this tab" inputmode="url"
+    autocomplete="off" spellcheck="false" aria-label="URL">
+  <span id="status" class="pill" data-state="wait" role="status" aria-atomic="true">Connecting</span>
+</header>
+<main><div class="stage">
+  <img id="screen" tabindex="0" alt="Live view of the browser tab; click to use it" hidden>
+  <div id="empty">
+    <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4"/></svg>
+    <strong id="empty-title">Connecting to mokuzu…</strong>
+    <span id="empty-text"></span>
+  </div>
+</div></main>
+<footer>
+  <input id="text" class="grow" placeholder="Type text for the page, Enter to send" autocomplete="off"
+    aria-label="Text to send">
+  <button id="send" class="send">Send</button>
+</footer>
 <script>
 const token = new URLSearchParams(location.search).get('token');
 const api = (path, tab) => `${path}?token=${token}` + (tab == null ? '' : `&tab=${tab}`);
 const $ = id => document.getElementById(id);
-let tab = null;
-const status = text => $('status').textContent = text;
-const sleep = ms => new Promise(done => setTimeout(done, ms));
+let tab = null, list = [];
+const status = (text, state) => { $('status').textContent = text; $('status').dataset.state = state; };
+function empty(title, text) {
+  $('screen').hidden = true; $('screen').removeAttribute('src');
+  $('empty').hidden = false; $('empty-title').textContent = title; $('empty-text').textContent = text || '';
+}
 
 async function tabs() {
-  const list = await (await fetch(api('/tabs'))).json();
+  list = await (await fetch(api('/tabs'))).json();
   const shown = tab;
   if (!list.some(t => t.id === tab)) tab = list.at(-1)?.id ?? null;
+  $('tab').replaceChildren(...list.map(t => new Option(t.title || 'Untitled', t.id, false, t.id === tab)));
+  for (const id of ['tab', 'back', 'url', 'text', 'send']) $(id).disabled = !list.length;
+  const current = list.find(t => t.id === tab);
+  if (current && document.activeElement !== $('url')) $('url').value = current.url;
   if (tab !== shown) show();
-  $('tab').replaceChildren(...list.map(t => new Option(`${t.id}: ${t.title || 'untitled'}`, t.id, false, t.id === tab)));
 }
-$('tab').onchange = () => { tab = Number($('tab').value); show(); };
+$('tab').onchange = () => { tab = Number($('tab').value); show(); tabs().catch(() => {}); };
 
 async function send(input) {
-  if (tab == null) return;
+  if (tab == null) return false;
   const reply = await fetch(api('/input', tab), { method: 'POST', body: JSON.stringify(input) });
-  if (!reply.ok) status(await reply.text());
+  if (!reply.ok) status(await reply.text(), 'error');
+  return reply.ok;
 }
 
 // Chrome pushes a frame on every repaint over one long response the browser shows as it comes.
 function show() {
-  if (tab == null) { status('No tab open yet.'); $('screen').removeAttribute('src'); return; }
+  if (tab == null) {
+    status('No tab', 'wait');
+    return empty('No tab open', 'When mokuzu opens a page, it shows up here and you can click and type in it.');
+  }
+  // Shown at once rather than on `load`, which browsers fire unevenly for a stream of frames.
   $('screen').src = api('/stream', tab);
+  $('screen').hidden = false; $('empty').hidden = true; status('Live', 'live');
 }
-$('screen').onerror = () => setTimeout(() => tabs().then(show).catch(() => {}), 1000);
+$('screen').onerror = () => {
+  if (tab == null) return;
+  empty('Reconnecting…', 'The tab stopped sending pictures; trying again.');
+  status('Reconnecting', 'error');
+  setTimeout(() => tabs().then(show).catch(() => {}), 1000);
+};
 
 const at = e => { const r = $('screen').getBoundingClientRect(); return { x: (e.clientX - r.left) / r.width, y: (e.clientY - r.top) / r.height }; };
 $('screen').addEventListener('click', e => { $('screen').focus(); send({ kind: 'click', ...at(e) }); });
@@ -404,19 +501,24 @@ $('screen').addEventListener('keydown', e => {
   e.preventDefault();
   send(e.key.length === 1 ? { kind: 'text', text: e.key } : { kind: 'key', key: e.key });
 });
-$('text').addEventListener('keydown', e => {
-  if (e.key !== 'Enter' || e.isComposing) return;
+function sendText() {
+  if (!$('text').value) return;
   send({ kind: 'text', text: $('text').value });
   $('text').value = '';
-});
+}
+$('text').addEventListener('keydown', e => { if (e.key === 'Enter' && !e.isComposing) sendText(); });
+$('send').onclick = sendText;
 $('url').addEventListener('keydown', e => {
   if (e.key !== 'Enter' || e.isComposing) return;
-  status('Opening…');
-  send({ kind: 'goto', url: $('url').value }).then(() => status('Opened.'));
+  let url = $('url').value.trim();
+  if (url && !/^https?:\/\//i.test(url)) url = 'https://' + url;
+  status('Opening', 'wait');
+  send({ kind: 'goto', url }).then(ok => { if (ok) { status('Live', 'live'); $('url').blur(); } });
 });
 $('back').onclick = () => send({ kind: 'back' });
-setInterval(() => tabs().catch(() => {}), 3000);
-tabs().catch(() => status('Cannot reach mokuzu.'));
+setInterval(() => tabs().catch(() => status('Offline', 'error')), 3000);
+tabs().then(() => { if (tab == null) show(); })
+  .catch(() => { status('Offline', 'error'); empty('Cannot reach mokuzu', 'Check that mokuzu is still running, then reload.'); });
 </script>
 </html>
 "#;
