@@ -3,7 +3,7 @@
 //! users are heard, per server if `[discord.guilds]` says so, and they approve settings changes
 //! with buttons.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
@@ -103,6 +103,28 @@ pub async fn serve(config: Config) -> Result<()> {
     client.start().await.context("Discord connection failed")
 }
 
+/// Ids of jobs with a run in progress; a job that comes due again while running is skipped.
+static RUNNING: Mutex<Option<HashSet<i64>>> = Mutex::new(None);
+
+/// Marks job `id` running until dropped; `None` if it already is.
+struct Running(i64);
+
+impl Running {
+    fn start(id: i64) -> Option<Self> {
+        let mut running = RUNNING.lock().unwrap_or_else(|e| e.into_inner());
+        running.get_or_insert_default().insert(id).then(|| Self(id))
+    }
+}
+
+impl Drop for Running {
+    fn drop(&mut self) {
+        let mut running = RUNNING.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(running) = running.as_mut() {
+            running.remove(&self.0);
+        }
+    }
+}
+
 /// Starts every due job, forever. A job missed while mokuzu was down runs once on startup.
 async fn run_scheduler(config: Config, db: Db, mcp: Arc<Mcp>, http: Arc<Http>) {
     let mut tick = tokio::time::interval(CRON_TICK);
@@ -115,7 +137,7 @@ async fn run_scheduler(config: Config, db: Db, mcp: Arc<Mcp>, http: Arc<Http>) {
 }
 
 /// Moves each due job to its next run (or deletes a one-off) before starting it, so a slow run
-/// can't start twice.
+/// can't start twice. A job whose last run is still going skips this one.
 // ponytail: scans every job each tick; query by next_run if job counts grow large.
 async fn start_due_jobs(config: &Config, db: &Db, mcp: &Arc<Mcp>, http: &Arc<Http>) -> Result<()> {
     let now = chrono::Utc::now().with_timezone(&config.timezone);
@@ -134,13 +156,23 @@ async fn start_due_jobs(config: &Config, db: &Db, mcp: &Arc<Mcp>, http: &Arc<Htt
                 db.remove_job(job.id).await?;
             }
         }
-        tokio::spawn(run_job(
+        let Some(running) = Running::start(job.id) else {
+            tracing::info!(
+                job = job.id,
+                "skipping a run: the last one has not finished"
+            );
+            continue;
+        };
+        let (config, db, mcp, http) = (
             config.clone(),
             db.clone(),
             Arc::clone(mcp),
             Arc::clone(http),
-            job,
-        ));
+        );
+        tokio::spawn(async move {
+            run_job(config, db, mcp, http, job).await;
+            drop(running);
+        });
     }
     Ok(())
 }
@@ -974,6 +1006,15 @@ fn chunks(text: &str, max: usize) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_running_job_cannot_start_again_until_it_ends() {
+        let first = Running::start(-7).expect("first run");
+        assert!(Running::start(-7).is_none());
+        assert!(Running::start(-8).is_some());
+        drop(first);
+        assert!(Running::start(-7).is_some());
+    }
 
     #[test]
     fn chunks_respect_limit_and_keep_all_text() {
