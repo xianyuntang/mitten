@@ -35,7 +35,7 @@ pub fn tool() -> ToolDefinition {
                 },
                 "prompt": {
                     "type": "string",
-                    "description": "For add and update: what to do on each run, replacing the old one on update. Make it self-contained; the run won't see this conversation.",
+                    "description": "For add and update: what to do on each run, replacing the old one on update. Make it self-contained, in the user's language, and say which language to reply in; the run won't see this conversation.",
                 },
                 "cron": {
                     "type": "string",
@@ -219,7 +219,7 @@ pub fn prompt(job: &Job) -> String {
     format!(
         "[Scheduled job #{} {} ({}). You are running on your own in a fresh conversation; nobody is \
          watching live and actions that need approval will be denied. Do the task and reply with \
-         the result.]\n\n{}",
+         the result, in the user's language (from saved facts, else the task's), not this note's.]\n\n{}",
         job.id,
         job.name,
         job.schedule.as_deref().unwrap_or("once"),

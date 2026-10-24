@@ -1,6 +1,7 @@
 //! `browser` tool: drives a Chrome window with its own lasting profile next to the database, so
-//! sign-ins made there stay between runs. Reading a tab runs freely; opening a page, clicking, and
-//! typing ask the user (or the reviewer, in auto mode) once per site, which approves it for good.
+//! sign-ins made there stay between runs. Reading a tab runs freely; opening a page, clicking,
+//! typing, and running a script ask the user (or the reviewer, in auto mode) once per site, which
+//! approves it for good.
 //!
 //! Chrome starts without the automation flags (`--enable-automation`, `AutomationControlled`),
 //! and the scripts mokuzu runs live in an isolated world, so pages see neither them nor their
@@ -133,7 +134,12 @@ pub fn tool() -> ToolDefinition {
              control inline as `[ref kind] label` (up to {MAX_CHARS} characters; pass `offset` for \
              more); `click` clicks control `ref`; `type` replaces the text in control `ref` with \
              `text`, then presses Enter if `submit`; `scroll` moves the page `up` or `down`; \
-             `screenshot` returns what the tab shows; `close` closes `tab`. When a page needs a \
+             `screenshot` returns what the tab shows; `script` runs `script`, an async JavaScript \
+             function body, against the tab's DOM and returns what it returns as JSON; `refs[n]` is \
+             control n from the latest `read`. Use it for what click and type cannot reach, such as \
+             a div that only a script listener makes clickable (`document.querySelector(...).click()`); \
+             it runs apart from the page's own scripts, so their variables are out of reach. \
+             `close` closes `tab`. When a page needs a \
              person (a captcha, a sign-in, a code), ask the user to send `/browser` for a live view \
              where they click and type themselves, then wait for them to say they are done. At most {MAX_TABS} tabs stay open; a new one \
              closes the one used longest ago. Refs come from the \
@@ -145,12 +151,13 @@ pub fn tool() -> ToolDefinition {
             "properties": {
                 "action": {
                     "type": "string",
-                    "enum": ["tabs", "navigate", "read", "click", "type", "scroll", "screenshot", "close"],
+                    "enum": ["tabs", "navigate", "read", "click", "type", "scroll", "screenshot", "script", "close"],
                 },
                 "tab": {"type": "integer", "description": "Tab number from `tabs` or `navigate`. Leave out for navigate to open a new tab."},
                 "url": {"type": "string", "description": "For navigate: an http or https URL."},
                 "ref": {"type": "integer", "description": "For click and type: a control's ref from `read`."},
                 "text": {"type": "string", "description": "For type: the text to enter."},
+                "script": {"type": "string", "description": "For script: a JavaScript function body; `return` a value to get it back."},
                 "submit": {"type": "boolean", "description": "For type: press Enter afterwards. Default false."},
                 "direction": {"type": "string", "enum": ["up", "down"], "description": "For scroll. Default down."},
                 "offset": {"type": "integer", "description": "For read: character offset to continue from. Default 0."},
@@ -168,6 +175,7 @@ struct Args {
     #[serde(rename = "ref")]
     target: Option<u32>,
     text: Option<String>,
+    script: Option<String>,
     #[serde(default)]
     submit: bool,
     direction: Option<String>,
@@ -415,6 +423,22 @@ impl Session {
                 let image = document::image(&shot(page).await?, Some(ImageMediaType::JPEG));
                 return Ok(("screenshot attached".to_owned(), vec![image]));
             }
+            "script" => {
+                let page = &self.tab(args.tab)?.clone();
+                let code = args.script.as_deref().context("`script` is required")?;
+                let ask = format!("📜 run a script in tab {}:\n{code}", tab_name(args));
+                if !self.sites.approve(&here(page).await?, &ask, io).await? {
+                    return Ok(denied());
+                }
+                let script = format!(
+                    "const refs = globalThis.mokuzuRefs || [];
+                     return (async () => {{ {code}\n}})()
+                       .then(v => JSON.stringify(v) ?? 'undefined');"
+                );
+                let out: String = evaluate(page, &script).await?;
+                tokio::time::sleep(SETTLE).await;
+                window(&out, args.offset)
+            }
             "close" => {
                 let id = args.tab.context("`tab` is required")?;
                 let index = self
@@ -484,7 +508,7 @@ impl Sites {
         }
         let site = site(url);
         let ask = format!(
-            "{action}\nApproving lets mokuzu open pages, click, and type on {site} from now on \
+            "{action}\nApproving lets mokuzu open pages, click, type, and run scripts on {site} from now on \
              without asking."
         );
         if !io.confirm(&ask).await? {
@@ -671,6 +695,7 @@ async fn evaluate<T: serde::de::DeserializeOwned>(page: &Page, body: &str) -> Re
     let params = EvaluateParams::builder()
         .expression(expression)
         .context_id(context)
+        .await_promise(true)
         .return_by_value(true)
         .build()
         .map_err(|err| anyhow!(err))?;
@@ -1128,6 +1153,14 @@ mod tests {
             .act(&call(json!({"action": "click", "tab": tab, "ref": 1})), io)
             .await
             .expect("click");
+        let (title, _) = session
+            .act(
+                &call(json!({"action": "script", "tab": tab, "script": "return document.title;"})),
+                io,
+            )
+            .await
+            .expect("script");
+        assert!(title.contains('"'), "{title}");
         let (tabs, _) = session
             .act(&call(json!({"action": "tabs"})), io)
             .await
