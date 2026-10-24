@@ -2063,7 +2063,7 @@ dependencies = [
 
 [[package]]
 name = "mokuzu"
-version = "0.5.17"
+version = "0.5.18"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
