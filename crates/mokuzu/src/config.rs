@@ -1,4 +1,4 @@
-//! TOML config file: OpenCode Go model and key, tools, MCP servers, logging, storage, and Discord.
+//! TOML config file: the model and its provider's key (OpenCode Go or Anthropic), tools, MCP servers, logging, storage, and Discord.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -7,7 +7,7 @@ use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 
 pub const DEFAULT_BASE_URL: &str = "https://opencode.ai/zen/go/v1";
-const DEFAULT_MODEL: &str = "minimax-m3";
+pub const ANTHROPIC_BASE_URL: &str = "https://api.anthropic.com/v1";
 pub const DEFAULT_MAX_TOKENS: u32 = 16_000;
 pub const DEFAULT_COMPACT_AT_TOKENS: usize = 200_000;
 pub const MIN_COMPACT_AT_TOKENS: usize = 10_000;
@@ -60,6 +60,47 @@ impl Api {
     }
 }
 
+/// Who serves the model: the config's `[opencode-go]` or `[anthropic]` section.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Provider {
+    OpencodeGo,
+    /// Anthropic's own API, which speaks only the Anthropic format.
+    Anthropic,
+}
+
+impl Provider {
+    /// The format `model` speaks here: always Anthropic's on Anthropic, guessed from the name on
+    /// OpenCode Go.
+    pub fn api_for(self, model: &str) -> Api {
+        match self {
+            Self::OpencodeGo => Api::for_model(model),
+            Self::Anthropic => Api::Anthropic,
+        }
+    }
+
+    /// The config section holding its key.
+    pub fn section(self) -> &'static str {
+        match self {
+            Self::OpencodeGo => "opencode-go",
+            Self::Anthropic => "anthropic",
+        }
+    }
+
+    pub fn default_base_url(self) -> &'static str {
+        match self {
+            Self::OpencodeGo => DEFAULT_BASE_URL,
+            Self::Anthropic => ANTHROPIC_BASE_URL,
+        }
+    }
+
+    pub fn default_model(self) -> &'static str {
+        match self {
+            Self::OpencodeGo => "minimax-m3",
+            Self::Anthropic => "claude-opus-5-5",
+        }
+    }
+}
+
 /// API key or token whose `Debug` output is redacted.
 #[derive(Clone, Deserialize)]
 #[serde(transparent)]
@@ -85,7 +126,8 @@ struct File {
     #[serde(default)]
     model: ModelSection,
     #[serde(rename = "opencode-go")]
-    opencode_go: OpenCodeGoSection,
+    opencode_go: Option<ProviderSection>,
+    anthropic: Option<ProviderSection>,
     #[serde(default)]
     tools: ToolsSection,
     #[serde(default)]
@@ -117,10 +159,10 @@ struct ModelSection {
     compact_at_tokens: Option<usize>,
 }
 
-/// OpenCode Go serves MiniMax, Qwen, and Claude models through an Anthropic-format Messages endpoint.
+/// `[opencode-go]` or `[anthropic]`: the provider's key, and a base URL to reach it through.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct OpenCodeGoSection {
+struct ProviderSection {
     api_key: Secret,
     base_url: Option<String>,
 }
@@ -430,9 +472,10 @@ pub struct Config {
     pub max_tokens: u32,
     /// Estimated history size (tokens) at which older turns are summarized.
     pub compact_at_tokens: usize,
+    pub provider: Provider,
     pub api_key: Secret,
     pub api: Api,
-    /// OpenCode Go base URL, e.g. `https://opencode.ai/zen/go/v1`.
+    /// The provider's base URL, e.g. `https://opencode.ai/zen/go/v1`.
     pub base_url: String,
     /// Enables the `web_search` tool when set.
     pub search: Option<Search>,
@@ -480,10 +523,15 @@ impl Config {
                 .context("cannot find home directory for the default database path")?
                 .join(".local/share/mokuzu/mokuzu.db"),
         };
-        let base_url = file
-            .opencode_go
+        let (provider, section) = match (file.opencode_go, file.anthropic) {
+            (Some(section), None) => (Provider::OpencodeGo, section),
+            (None, Some(section)) => (Provider::Anthropic, section),
+            (Some(_), Some(_)) => bail!("set only one of [opencode-go] and [anthropic]"),
+            (None, None) => bail!("add [opencode-go] or [anthropic] with your api_key"),
+        };
+        let base_url = section
             .base_url
-            .unwrap_or_else(|| DEFAULT_BASE_URL.to_owned());
+            .unwrap_or_else(|| provider.default_base_url().to_owned());
 
         let compact_at_tokens = file
             .model
@@ -501,7 +549,17 @@ impl Config {
             })?,
             None => system_timezone(),
         };
-        let model = file.model.name.unwrap_or_else(|| DEFAULT_MODEL.to_owned());
+        let model = file
+            .model
+            .name
+            .unwrap_or_else(|| provider.default_model().to_owned());
+        let api = match (provider, file.model.api) {
+            (Provider::Anthropic, Some(api)) if api != Api::Anthropic => {
+                bail!("[anthropic] only speaks model.api = \"anthropic\"")
+            }
+            (_, Some(api)) => api,
+            (_, None) => provider.api_for(&model),
+        };
         let approval = match file.approval.mode {
             ApprovalMode::Ask => Approval::Ask,
             ApprovalMode::Auto => Approval::Auto {
@@ -510,11 +568,12 @@ impl Config {
         };
         Ok(Self {
             approval,
-            api: file.model.api.unwrap_or_else(|| Api::for_model(&model)),
+            api,
             model,
             max_tokens: file.model.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS),
             compact_at_tokens,
-            api_key: file.opencode_go.api_key,
+            provider,
+            api_key: section.api_key,
             base_url: base_url.trim_end_matches('/').to_owned(),
             search: match (file.tools.searxng, file.tools.brave) {
                 (Some(_), Some(_)) => {
@@ -581,6 +640,21 @@ mod tests {
         let config = Config::parse(include_str!("../../../config.example.toml")).expect("valid");
         assert_eq!(config.base_url, "https://opencode.ai/zen/go/v1");
         assert_eq!(config.api, Api::Anthropic);
+    }
+
+    #[test]
+    fn anthropic_replaces_opencode_go() {
+        let config = Config::parse("[anthropic]\napi_key = \"sk-ant\"\n").expect("valid");
+        assert_eq!(config.provider, Provider::Anthropic);
+        assert_eq!(config.base_url, ANTHROPIC_BASE_URL);
+        assert_eq!(config.model, "claude-opus-5-5");
+        assert_eq!(config.api, Api::Anthropic);
+        assert_eq!(config.api_key.as_str(), "sk-ant");
+        let both = "[anthropic]\napi_key = \"a\"\n[opencode-go]\napi_key = \"o\"\n";
+        assert!(Config::parse(both).is_err());
+        assert!(Config::parse("[log]\nlevel = \"warn\"\n").is_err());
+        let wrong_api = "[model]\napi = \"openai\"\n[anthropic]\napi_key = \"a\"\n";
+        assert!(Config::parse(wrong_api).is_err());
     }
 
     #[test]

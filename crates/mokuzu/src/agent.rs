@@ -18,7 +18,7 @@ use serde_json::Value;
 
 use crate::browser;
 use crate::compact;
-use crate::config::{Api, Config};
+use crate::config::{Api, Config, Provider};
 use crate::cron;
 use crate::db::Db;
 use crate::document;
@@ -81,10 +81,12 @@ impl Model {
     /// `session` goes out as `x-opencode-session` so OpenCode Go can route and cache per conversation.
     fn new(config: &Config, session: &str) -> Result<Self> {
         let mut headers = HeaderMap::new();
-        headers.insert(
-            "x-opencode-session",
-            HeaderValue::from_str(session).context("invalid session id")?,
-        );
+        if config.provider == Provider::OpencodeGo {
+            headers.insert(
+                "x-opencode-session",
+                HeaderValue::from_str(session).context("invalid session id")?,
+            );
+        }
         // OpenCode Go asks clients to name themselves instead of sending a generic HTTP-library agent.
         let http = reqwest::Client::builder()
             .user_agent(concat!("mokuzu/", env!("CARGO_PKG_VERSION")))
@@ -210,7 +212,7 @@ impl Review {
         } else {
             Config {
                 model: model.clone(),
-                api: Api::for_model(model),
+                api: config.provider.api_for(model),
                 ..config.clone()
             }
         };
@@ -710,6 +712,7 @@ impl Agent {
         let old = &self.config;
         if fresh.model != old.model
             || fresh.api != old.api
+            || fresh.provider != old.provider
             || fresh.base_url != old.base_url
             || fresh.api_key.as_str() != old.api_key.as_str()
         {
@@ -1223,7 +1226,7 @@ mod tests {
         let file = dir.join("note.txt");
         std::fs::write(&file, "the secret word is pelican").expect("write");
         let config = Config {
-            api: Api::for_model(&model),
+            api: loaded.provider.api_for(&model),
             model,
             approval: crate::config::Approval::Ask,
             ..loaded

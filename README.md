@@ -55,8 +55,9 @@ mokuzu configure   # full-screen setup; ←/→ switch pages, Save on any page
 mokuzu             # chat in the terminal
 ```
 
-`mokuzu configure` asks for your API key and model and writes
-`~/.config/mokuzu/config.toml`. Only the **Model** page is required.
+`mokuzu configure` asks for your provider, API key, and model and writes
+`~/.config/mokuzu/config.toml`. The provider is OpenCode Go, or Anthropic's API for Claude with an
+Anthropic API key. Only the **Model** page is required.
 
 In the terminal chat, `/cast <request>` sends out a cast of crabs (see `cast_crabs` under Tools), `/browser` gives a link to a live view of the browser, and `/exit` (or Ctrl-C) quits.
 Conversations are saved, so the next `mokuzu` picks up where you left off.

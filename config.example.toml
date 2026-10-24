@@ -8,11 +8,14 @@
 # timezone = "Asia/Taipei"
 
 [model]
-# Optional. Any OpenCode Go model, e.g. minimax-m3, qwen3.8-max, glm-5.3, kimi-k3, deepseek-v4-pro.
+# Optional. Any model your provider serves. OpenCode Go: e.g. minimax-m3 (default), qwen3.8-max,
+# glm-5.3, kimi-k3, deepseek-v4-pro. Anthropic: e.g. claude-opus-5-5 (default), claude-sonnet-5-5,
+# claude-haiku-5-5.
 name = "minimax-m3"
-# Optional. "anthropic" (/messages), "openai" (/chat/completions), "responses" (/responses), or
-# "gemini" (generateContent); guessed from the name: minimax*/qwen*/claude* use anthropic,
-# gpt*/grok*/muse* responses, gemini* gemini, and everything else openai.
+# Optional, OpenCode Go only (Anthropic speaks only "anthropic"). "anthropic" (/messages),
+# "openai" (/chat/completions), "responses" (/responses), or "gemini" (generateContent); guessed
+# from the name: minimax*/qwen*/claude* use anthropic, gpt*/grok*/muse* responses, gemini* gemini,
+# and everything else openai.
 # api = "anthropic"
 # Optional. Default 16000.
 # max_tokens = 16000
@@ -21,10 +24,17 @@ name = "minimax-m3"
 # stay within the model's context window. Lower it for models with a smaller window. Default 200000.
 # compact_at_tokens = 200000
 
+# The provider: set exactly one of [opencode-go] and [anthropic].
 [opencode-go]
 api_key = "your-opencode-api-key"
 # Optional. ".../messages" is appended.
 # base_url = "https://opencode.ai/zen/go/v1"
+
+# Or Anthropic's own API, for Claude models, with a key from https://platform.claude.com.
+# [anthropic]
+# api_key = "sk-ant-..."
+# # Optional. Change it only for a proxy.
+# base_url = "https://api.anthropic.com/v1"
 
 # Optional. Enables the `web_search` tool through your SearXNG instance, or through the Brave
 # Search API below; set only one. SearXNG's settings.yml must list `json` under search.formats,

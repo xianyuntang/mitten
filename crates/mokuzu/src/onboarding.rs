@@ -10,7 +10,7 @@ use ratatui::style::{Color, Modifier, Style, Stylize};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Clear, List, ListState, Padding, Paragraph, Wrap};
 
-use crate::config::{self, Api, Config};
+use crate::config::{self, Api, Config, Provider};
 use toml_edit::{Array, DocumentMut, InlineTable, Item, Table};
 
 /// Common OpenCode Go models; `config::Api::for_model` picks each one's endpoint format.
@@ -34,6 +34,15 @@ pub const MODELS: &[&str] = &[
     "muse-spark-1.3-contributor",
     "gemini-4-argon-contributor",
 ];
+/// Current Claude models on Anthropic's API.
+const ANTHROPIC_MODELS: &[&str] = &[
+    "claude-opus-5-5",
+    "claude-sonnet-5-5",
+    "claude-haiku-5-5",
+    "claude-fable-5-1",
+];
+const OPENCODE_GO: &str = "OpenCode Go";
+const ANTHROPIC: &str = "Anthropic";
 const CUSTOM: &str = "Custom…";
 const ENABLED: &str = "Enabled";
 const DISABLED: &str = "Disabled";
@@ -90,7 +99,7 @@ struct Field {
 }
 
 // Field indices.
-// 0 is Provider, which has only OpenCode Go for now.
+const PROVIDER: usize = 0;
 const KEY: usize = 1;
 const MODEL: usize = 2;
 const CUSTOM_MODEL: usize = 3;
@@ -149,6 +158,20 @@ struct Form {
     plain: bool,
 }
 
+fn models(provider: Provider) -> &'static [&'static str] {
+    match provider {
+        Provider::OpencodeGo => MODELS,
+        Provider::Anthropic => ANTHROPIC_MODELS,
+    }
+}
+
+fn provider_name(provider: Provider) -> &'static str {
+    match provider {
+        Provider::OpencodeGo => OPENCODE_GO,
+        Provider::Anthropic => ANTHROPIC,
+    }
+}
+
 fn options(values: &[&str]) -> Vec<String> {
     values.iter().map(|v| (*v).to_owned()).collect()
 }
@@ -172,8 +195,9 @@ impl Form {
             None => (None, None),
         };
         let search_auth = searxng.and_then(|s| s.auth.as_ref());
-        let model = current.map_or(MODELS[0], |c| c.model.as_str());
-        let preset = MODELS.contains(&model);
+        let provider = current.map_or(Provider::OpencodeGo, |c| c.provider);
+        let model = current.map_or(models(provider)[0], |c| c.model.as_str());
+        let preset = models(provider).contains(&model);
         let log = current.map_or("warn", |c| c.log_level.as_str());
         let database = match current {
             Some(c) => c.database_path.clone(),
@@ -186,14 +210,14 @@ impl Form {
             value,
         };
 
-        let mut model_options = options(MODELS);
+        let mut model_options = options(models(provider));
         model_options.push(CUSTOM.to_owned());
         let mut fields = vec![
             field(
                 0,
                 "Provider",
-                Kind::Select(options(&["OpenCode Go"])),
-                "OpenCode Go".to_owned(),
+                Kind::Select(options(&[OPENCODE_GO, ANTHROPIC])),
+                provider_name(provider).to_owned(),
             ),
             field(
                 0,
@@ -317,7 +341,7 @@ impl Form {
             _ => SAME_MODEL,
         };
         let mut reviewers = vec![SAME_MODEL];
-        reviewers.extend(MODELS);
+        reviewers.extend(models(provider));
         fields.push(field(
             4,
             "Reviewer model",
@@ -355,7 +379,7 @@ impl Form {
             search.map_or(5, config::Search::results).to_string(),
         ));
         let api = match current {
-            Some(c) if c.api != Api::for_model(&c.model) => c.api.name(),
+            Some(c) if c.api != c.provider.api_for(&c.model) => c.api.name(),
             _ => API_AUTO,
         };
         let mut apis = vec![API_AUTO];
@@ -461,6 +485,7 @@ impl Form {
                 MCP_COMMAND | MCP_ARGS | MCP_ENV => self.fields[MCP_ADD].value == STDIO,
                 MCP_URL | MCP_TOKEN => self.fields[MCP_ADD].value == HTTP,
                 REVIEWER => self.fields[APPROVAL].value == AUTO,
+                API => self.provider() == Provider::OpencodeGo,
                 _ => true,
             }
     }
@@ -518,8 +543,12 @@ impl Form {
                     KeyCode::Down => menu.select_next(),
                     KeyCode::Enter => {
                         let chosen = menu.selected().unwrap_or(0).min(values.len() - 1);
+                        let before = self.provider();
                         self.fields[self.focus].value = values[chosen].clone();
                         self.menu = None;
+                        if self.provider() != before {
+                            self.switch_provider(before);
+                        }
                         self.edited();
                     }
                     KeyCode::Esc => self.menu = None,
@@ -571,6 +600,31 @@ impl Form {
     }
 
     /// Any edit clears a previous save error.
+    fn provider(&self) -> Provider {
+        if self.fields[PROVIDER].value == ANTHROPIC {
+            Provider::Anthropic
+        } else {
+            Provider::OpencodeGo
+        }
+    }
+
+    /// Points the model and reviewer menus, and a default base URL, at the newly picked provider.
+    fn switch_provider(&mut self, from: Provider) {
+        let to = self.provider();
+        let mut model_options = options(models(to));
+        model_options.push(CUSTOM.to_owned());
+        self.fields[MODEL].value = model_options[0].clone();
+        self.fields[MODEL].kind = Kind::Select(model_options);
+        let mut reviewers = vec![SAME_MODEL];
+        reviewers.extend(models(to));
+        self.fields[REVIEWER].value = SAME_MODEL.to_owned();
+        self.fields[REVIEWER].kind = Kind::Select(options(&reviewers));
+        let url = self.value(BASE_URL);
+        if url.is_empty() || url == from.default_base_url() {
+            self.fields[BASE_URL].value = to.default_base_url().to_owned();
+        }
+    }
+
     fn edited(&mut self) {
         self.status = Line::default();
     }
@@ -652,14 +706,16 @@ impl Form {
         }
     }
 
-    /// The `[model]` and `[opencode-go]` settings past name and key; each is `None` when it
-    /// is the default, so the file follows later changes to defaults.
+    /// The `[model]` and provider settings past name and key; each is `None` when it is the
+    /// default, so the file follows later changes to defaults.
     fn model_options(&self) -> std::result::Result<ModelOptions, String> {
+        let provider = self.provider();
         let api = self.value(API);
         let base_url = self.value(BASE_URL);
         Ok(ModelOptions {
-            api: (api != API_AUTO).then_some(api),
-            base_url: (!base_url.is_empty() && base_url != config::DEFAULT_BASE_URL)
+            // Anthropic speaks only its own format.
+            api: (api != API_AUTO && provider == Provider::OpencodeGo).then_some(api),
+            base_url: (!base_url.is_empty() && base_url != provider.default_base_url())
                 .then_some(base_url),
             max_tokens: self
                 .number(MAX_TOKENS, 1)?
@@ -839,6 +895,7 @@ impl Form {
 
     fn answers(&self) -> std::result::Result<Answers, String> {
         Ok(Answers {
+            provider: self.provider(),
             api_key: self.required(KEY)?,
             model: self.model()?,
             discord: self.discord()?,
@@ -1100,9 +1157,9 @@ const FOCUS_BG: Color = Color::Indexed(236);
 /// Help for field `i`, and a warning to show with it ("" for none).
 fn help(i: usize) -> (&'static str, &'static str) {
     let about = match i {
-        KEY => "Your OpenCode Go API key. ^R shows it.",
+        KEY => "Your OpenCode Go or Anthropic API key. ^R shows it.",
         MODEL => "The model Mokuzu talks with. Pick Custom… to type another model ID.",
-        CUSTOM_MODEL => "An OpenCode Go model ID.",
+        CUSTOM_MODEL => "A model ID your provider serves.",
         DISCORD => "Lets `mokuzu serve` chat through a Discord bot, by DM and in server channels.",
         TOKEN => {
             "Bot token from the Discord Developer Portal › Bot. Turn on Message Content Intent \
@@ -1149,13 +1206,16 @@ fn help(i: usize) -> (&'static str, &'static str) {
             "Which format the model's endpoint speaks. Auto guesses from the model name; pick one \
              if it guesses wrong."
         }
-        BASE_URL => "OpenCode Go endpoint. Change it only for a proxy or mirror.",
+        BASE_URL => "The provider's endpoint. Change it only for a proxy or mirror.",
         MAX_TOKENS => "Longest reply the model may write, in tokens.",
         COMPACT_AT => {
             "When the conversation grows past about this many tokens, old tool output is cleared \
              and older turns are summarized. Lower it for models with a smaller context window."
         }
-        0 => "Where Mokuzu's model runs. Only OpenCode Go for now.",
+        PROVIDER => {
+            "Where Mokuzu's model runs: OpenCode Go, or Anthropic's API for Claude with an \
+             Anthropic API key."
+        }
         _ => "Keep it, or Remove it.",
     };
     let warning = match i {
@@ -1248,6 +1308,7 @@ enum SearchAnswers {
 }
 
 struct Answers {
+    provider: Provider,
     model: String,
     api_key: String,
     discord: Option<DiscordAnswers>,
@@ -1326,23 +1387,24 @@ fn render_toml(answers: &Answers) -> String {
     if let Some(n) = options.compact_at_tokens {
         model.push_str(&format!("compact_at_tokens = {n}\n"));
     }
-    let mut opencode = format!("api_key = {}\n", quote(&answers.api_key));
+    let mut key = format!("api_key = {}\n", quote(&answers.api_key));
     if let Some(url) = &options.base_url {
-        opencode.push_str(&format!("base_url = {}\n", quote(url)));
+        key.push_str(&format!("base_url = {}\n", quote(url)));
     }
     text.push_str(&format!(
         "\n\
          [model]\n\
          {model}\
          \n\
-         [opencode-go]\n\
-         {opencode}\
+         [{section}]\n\
+         {key}\
          \n\
          [log]\n\
          level = {log}\n\
          \n\
          [database]\n\
          path = {db}\n",
+        section = answers.provider.section(),
         log = quote(&answers.log_level),
         db = quote(&answers.database.to_string_lossy()),
     ));
@@ -1461,6 +1523,7 @@ mod tests {
     #[test]
     fn rendered_config_parses_back() {
         let text = render_toml(&Answers {
+            provider: Provider::OpencodeGo,
             model: "qwen3.8-max".to_owned(),
             api_key: "sk-\"quoted\"".to_owned(),
             discord: Some(DiscordAnswers {
@@ -1562,6 +1625,7 @@ mod tests {
             panic!("search on");
         };
         let text = render_toml(&Answers {
+            provider: Provider::OpencodeGo,
             model: "m".to_owned(),
             api_key: "k".to_owned(),
             discord: None,
@@ -1580,6 +1644,37 @@ mod tests {
         let reopened = Form::new(Some(&config)).expect("form");
         assert_eq!(reopened.fields[SEARCH].value, BRAVE);
         assert_eq!(reopened.fields[BRAVE_KEY].value, "bk");
+    }
+
+    #[test]
+    fn anthropic_swaps_models_and_base_url_and_saves_its_own_section() {
+        let mut form = Form::new(None).expect("form");
+        form.fields[KEY].value = "sk-ant".to_owned();
+        form.fields[PROVIDER].value = ANTHROPIC.to_owned();
+        form.switch_provider(Provider::OpencodeGo);
+        assert_eq!(form.value(MODEL), "claude-opus-5-5");
+        assert_eq!(form.value(BASE_URL), config::ANTHROPIC_BASE_URL);
+        form.step = 4;
+        assert!(!form.visible().contains(&API), "Anthropic has one format");
+        let answers = form.answers().expect("valid");
+        assert!(
+            answers.options.base_url.is_none(),
+            "defaults aren't written"
+        );
+        let text = render_toml(&answers);
+        assert!(
+            text.contains("[anthropic]\napi_key = \"sk-ant\"\n"),
+            "{text}"
+        );
+        let config = Config::parse(&text).expect("valid");
+        assert_eq!(config.provider, Provider::Anthropic);
+        let reopened = Form::new(Some(&config)).expect("form");
+        assert_eq!(reopened.value(PROVIDER), ANTHROPIC);
+        assert_eq!(reopened.value(MODEL), "claude-opus-5-5");
+        let Kind::Select(reviewers) = &reopened.fields[REVIEWER].kind else {
+            panic!("reviewer menu");
+        };
+        assert!(reviewers.iter().any(|r| r == "claude-haiku-5-5"));
     }
 
     #[test]
