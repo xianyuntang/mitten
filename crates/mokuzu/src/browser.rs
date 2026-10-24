@@ -73,7 +73,11 @@ const label = el => clean(el.getAttribute('aria-label') || el.innerText || el.pl
 "#;
 
 /// Walks the rendered page into text, with each control inline as `[ref kind] label`. Refs index
-/// `globalThis.mokuzuRefs`, renumbered on every read.
+/// `globalThis.mokuzuRefs`, renumbered on every read. Elements only a script makes clickable (an
+/// `onclick` attribute, or a pointer cursor its parent lacks) are refs too, as `[ref clickable]`
+/// with their content still walked.
+// ponytail: listeners added with addEventListener on a div without a pointer cursor stay
+// invisible; the isolated world cannot list them.
 // ponytail: skips iframes; walk them through their frame's isolated world if pages need it.
 const READ_JS: &str = r#"
 const CONTROLS = 'a[href],button,input:not([type=hidden]),select,textarea,summary,[role=button],'
@@ -82,7 +86,7 @@ const CONTROLS = 'a[href],button,input:not([type=hidden]),select,textarea,summar
 const SKIP = new Set(['SCRIPT', 'STYLE', 'NOSCRIPT', 'TEMPLATE', 'HEAD', 'IFRAME']);
 const refs = globalThis.mokuzuRefs = [null];
 const out = [];
-const walk = node => {
+const walk = (node, pointer) => {
   const children = node.shadowRoot ? node.shadowRoot.childNodes
     : node.tagName === 'SLOT' && node.assignedNodes().length ? node.assignedNodes()
     : node.childNodes;
@@ -93,7 +97,8 @@ const walk = node => {
       continue;
     }
     if (child.nodeType !== Node.ELEMENT_NODE || SKIP.has(child.tagName)) continue;
-    const display = getComputedStyle(child).display;
+    const style = getComputedStyle(child);
+    const display = style.display;
     if (display !== 'contents' && !child.checkVisibility({visibilityProperty: true})) continue;
     const block = !display.startsWith('inline') && display !== 'contents';
     if (block) out.push('\n');
@@ -107,12 +112,17 @@ const walk = node => {
       const name = typed && label(child) === clean(child.value).slice(0, 100) ? '' : label(child);
       out.push(`[${refs.length - 1} ${kind}] ${name}${typed}${checked}`);
     } else {
-      walk(child);
+      const clicks = style.cursor === 'pointer';
+      if (child.hasAttribute('onclick') || (clicks && !pointer)) {
+        refs.push(child);
+        out.push(`[${refs.length - 1} clickable${child.id ? ` #${child.id}` : ''}]`);
+      }
+      walk(child, clicks);
     }
     if (block) out.push('\n');
   }
 };
-walk(document.body);
+walk(document.body, false);
 return out.join(' ').replace(/ *\n[\s]*/g, '\n').trim();
 "#;
 
@@ -132,7 +142,8 @@ pub fn tool() -> ToolDefinition {
              public page, `fetch_url` is faster. Actions: `tabs` lists open tabs; `navigate` opens \
              `url` in `tab`, or in a new tab without one; `read` returns the page as text, each \
              control inline as `[ref kind] label` (up to {MAX_CHARS} characters; pass `offset` for \
-             more); `click` clicks control `ref`; `type` replaces the text in control `ref` with \
+             more), and elements only a script makes clickable as `[ref clickable #id]` before \
+             their content; `click` clicks control `ref`; `type` replaces the text in control `ref` with \
              `text`, then presses Enter if `submit`; `scroll` moves the page `up` or `down`; \
              `screenshot` returns what the tab shows; `script` runs `script`, an async JavaScript \
              function body, against the tab's DOM and returns what it returns as JSON; `refs[n]` is \
@@ -1144,6 +1155,20 @@ mod tests {
             .expect("read");
         assert!(page.contains("Example Domain"), "{page}");
         assert!(page.contains("[1 a]"), "{page}");
+        let (_, _) = session
+            .act(
+                &call(json!({"action": "script", "tab": tab, "script":
+                    "document.body.insertAdjacentHTML('beforeend', \
+                     '<div id=cell onclick=\"this.textContent = 99\"><span>0</span></div>');"})),
+                io,
+            )
+            .await
+            .expect("script");
+        let (page, _) = session
+            .act(&call(json!({"action": "read", "tab": tab})), io)
+            .await
+            .expect("read");
+        assert!(page.contains("clickable #cell] 0"), "{page}");
         let (_, shots) = session
             .act(&call(json!({"action": "screenshot", "tab": tab})), io)
             .await
