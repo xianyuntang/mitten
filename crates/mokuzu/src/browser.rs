@@ -311,6 +311,8 @@ impl Session {
             let used = self.tabs.remove(index);
             self.tabs.push(used);
         }
+        // Clicks and popups open tabs too; `refresh` picks them up uncounted.
+        self.trim(MAX_TABS).await;
         let text = match args.action.as_str() {
             "tabs" => self.list().await,
             "navigate" => {
@@ -329,12 +331,7 @@ impl Session {
                 let id = match args.tab {
                     Some(id) => id,
                     None => {
-                        while self.tabs.len() >= MAX_TABS {
-                            let (_, stale) = self.tabs.remove(0);
-                            if let Err(err) = stale.close().await {
-                                tracing::debug!("failed to close a stale tab: {err}");
-                            }
-                        }
+                        self.trim(MAX_TABS - 1).await;
                         // Blank first, so the tab is kept even if the load below times out.
                         let page = self.browser.new_page("about:blank").await?;
                         if self.screen.is_some() {
@@ -464,6 +461,16 @@ impl Session {
             other => bail!("unknown action `{other}`"),
         };
         Ok((text, Vec::new()))
+    }
+
+    /// Closes the tabs used longest ago until at most `keep` are open.
+    async fn trim(&mut self, keep: usize) {
+        while self.tabs.len() > keep {
+            let (_, stale) = self.tabs.remove(0);
+            if let Err(err) = stale.close().await {
+                tracing::debug!("failed to close a stale tab: {err}");
+            }
+        }
     }
 
     async fn list(&self) -> String {
@@ -1191,6 +1198,17 @@ mod tests {
             .await
             .expect("tabs");
         assert!(tabs.contains("iana.org"), "{tabs}");
+        // Tabs opened outside `navigate`, like popups, still count against the cap.
+        for _ in 0..MAX_TABS + 2 {
+            session.browser.new_page("about:blank").await.expect("tab");
+        }
+        session.refresh().await.expect("refresh");
+        let (tabs, _) = session
+            .act(&call(json!({"action": "tabs", "tab": tab})), io)
+            .await
+            .expect("tabs");
+        assert_eq!(tabs.lines().count(), MAX_TABS, "{tabs}");
+        assert!(tabs.contains(&format!("tab {tab}:")), "{tabs}");
         let webdriver: bool = evaluate(
             session.tab(Some(tab)).expect("tab"),
             "return navigator.webdriver;",
