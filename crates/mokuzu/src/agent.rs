@@ -535,25 +535,16 @@ impl Agent {
                     Ok(new) => new,
                     Err(problem) => return Ok(format!("error: {problem}")),
                 };
-                // Discord cuts long approval prompts short, so show the whole skill first. The
-                // prompt still carries it all, for the auto-approval reviewer.
-                let text = skill::render(&new);
-                io.say(&format!("📘 skill to save:\n\n{text}")).await?;
                 let verb = if existing.is_some() {
-                    "replace"
+                    "updated"
                 } else {
-                    "save"
+                    "saved"
                 };
-                if !io
-                    .confirm(&format!("{verb} skill `{name}`:\n{text}"))
-                    .await?
-                {
-                    return Ok("error: the user denied saving this skill".to_owned());
-                }
+                io.note(&format!("📘 {verb} skill `{name}`: {}", new.description))
+                    .await?;
                 self.db.save_skill(self.user, new).await?;
-                io.ran("saved", true).await?;
                 Ok(format!(
-                    "saved skill {name}; it is listed from the next message"
+                    "{verb} skill {name}; it is listed from the next message"
                 ))
             }
             Some("remove") => {
